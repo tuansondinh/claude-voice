@@ -587,6 +587,31 @@ class MacOSContinuousListener:
 
         # Use the shared backend and install tap
         self._backend = backend
+
+        # --- Porcupine wake-word engine (Phase 3) ---
+        self._porcupine: Optional[Any] = None
+        key = os.environ.get("PORCUPINE_ACCESS_KEY")
+        path = os.environ.get("PORCUPINE_MODEL_PATH")
+        if key and path:
+            try:
+                import pvporcupine  # type: ignore[import-untyped]
+                self._porcupine = pvporcupine.create(access_key=key, keyword_paths=[path])
+                _log("Porcupine wake-word engine initialised.")
+            except Exception as e:
+                _log(f"Porcupine init failed: {e}")
+                self._porcupine = None
+
+        # Mode state machine: "wake_word" (waiting for keyword) or "active" (VAD listening)
+        self._mode: str = "wake_word" if self._porcupine is not None else "active"
+        self._active_since: Optional[float] = None
+
+        # Wake-word-only mode: after one utterance, return to wake_word mode.
+        # Default True when Porcupine is available and LAZY_CLAUDE_ALWAYS_ON != "1".
+        if self._porcupine is not None and os.environ.get("LAZY_CLAUDE_ALWAYS_ON") != "1":
+            self._wake_word_only_mode: bool = True
+        else:
+            self._wake_word_only_mode = False
+
         self._backend.install_mic_tap(self._process_chunk)
 
         _log("MacOSContinuousListener started.")
@@ -633,6 +658,9 @@ class MacOSContinuousListener:
             self._active.clear()
             self._reset_utterance_state()
             self.drain_queue()
+            # On deactivation, return to wake_word mode if Porcupine is available
+            if getattr(self, '_porcupine', None) is not None:
+                self._mode = "wake_word"
             _log("MacOSContinuousListener: voice mode OFF.")
 
     @property
@@ -677,6 +705,11 @@ class MacOSContinuousListener:
     def stop(self) -> None:
         """Stop the backend and release resources."""
         self._stop_event.set()
+        if getattr(self, '_porcupine', None) is not None:
+            try:
+                self._porcupine.delete()
+            except Exception:
+                pass
         try:
             self._backend.shutdown()
         except Exception:
@@ -686,6 +719,19 @@ class MacOSContinuousListener:
     # ------------------------------------------------------------------
     # Internal: called by AVAudioBackend tap consumer thread
     # ------------------------------------------------------------------
+
+    def _play_ping(self) -> None:
+        """Play a brief 440Hz confirmation tone via the backend.
+
+        Sets _tts_active around playback to suppress VAD self-triggering.
+        """
+        t = np.linspace(0, 0.08, int(0.08 * _TTS_RATE), endpoint=False)
+        ping = (np.sin(2 * np.pi * 440 * t) * 0.3).astype(np.float32)
+        self._tts_active = True
+        try:
+            self._backend.play_audio(ping)
+        finally:
+            self._tts_active = False
 
     def _process_chunk(self, chunk: np.ndarray) -> None:
         """Process one 16kHz/512-sample chunk from the mic tap.
@@ -701,10 +747,27 @@ class MacOSContinuousListener:
             return
 
         chunk = chunk.astype(np.float32)
-        prob = self._vad(chunk)
-        is_speech = prob >= self.NORMAL_THRESHOLD
         chunk_duration = _VAD_CHUNK / _VAD_RATE  # ~0.032 s
         now = time.monotonic()
+
+        # --- Wake word mode: run Porcupine, not VAD ---
+        _porcupine = getattr(self, '_porcupine', None)
+        _mode = getattr(self, '_mode', 'active')
+        if _porcupine is not None and _mode == "wake_word":
+            pcm_int16 = (chunk * 32767).clip(-32768, 32767).astype(np.int16)
+            result = _porcupine.process(pcm_int16)
+            if result >= 0:
+                # Keyword detected — play ping and switch to active
+                self._play_ping()
+                self._reset_utterance_state()
+                self._mode = "active"
+                self._active_since = time.monotonic()
+                _log("MacOSContinuousListener: wake word detected — switching to active.")
+            return  # in wake_word mode, don't run VAD
+
+        # --- Active mode: run existing Silero VAD logic ---
+        prob = self._vad(chunk)
+        is_speech = prob >= self.NORMAL_THRESHOLD
 
         tts_active = self._tts_active
 
@@ -734,6 +797,18 @@ class MacOSContinuousListener:
                 self._accumulated_speech = chunk_duration
                 self._silence_started = None
                 self._utterance_chunks = [chunk]
+            else:
+                # Check 15s timeout while in WAITING state (not recording)
+                _active_since = getattr(self, '_active_since', None)
+                if (
+                    _active_since is not None
+                    and now - _active_since > 15.0
+                ):
+                    _log("MacOSContinuousListener: 15s timeout — returning to wake_word.")
+                    self._reset_utterance_state()
+                    if getattr(self, '_porcupine', None) is not None:
+                        self._mode = "wake_word"
+                        self._active_since = None
         else:
             self._utterance_chunks.append(chunk)
             if is_speech:
@@ -758,6 +833,11 @@ class MacOSContinuousListener:
                     self._utterance_chunks = []
                     self._accumulated_speech = 0.0
                     self._silence_started = None
+                    # After utterance stored: if wake_word_only mode, return to wake_word
+                    if getattr(self, '_wake_word_only_mode', False) and getattr(self, '_porcupine', None) is not None:
+                        self._reset_utterance_state()
+                        self._mode = "wake_word"
+                        self._active_since = None
 
 
 # ---------------------------------------------------------------------------

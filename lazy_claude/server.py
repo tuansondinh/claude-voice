@@ -390,8 +390,30 @@ class VoiceServer:
         ``_reset_utterance_state()`` so no mid-utterance audio leaks across
         mode boundaries.
         """
-        # Stub — full implementation in Phase 3.
-        raise NotImplementedError("set_listening_mode is implemented in Phase 3")
+        porcupine_available = (
+            hasattr(self._listener, '_porcupine')
+            and self._listener._porcupine is not None
+        )
+
+        if mode == "wake_word" and not porcupine_available:
+            _log("WARNING: wake_word mode requested but Porcupine not available — falling back to always_on.")
+            effective_mode = "always_on"
+        else:
+            effective_mode = mode
+
+        # Update wake_word_only flag on listener
+        if hasattr(self._listener, '_wake_word_only_mode'):
+            self._listener._wake_word_only_mode = (effective_mode == "wake_word")
+
+        # If switching to wake_word, reset utterance state and set mode
+        if effective_mode == "wake_word":
+            if hasattr(self._listener, '_reset_utterance_state'):
+                self._listener._reset_utterance_state()
+            if hasattr(self._listener, '_mode'):
+                self._listener._mode = "wake_word"
+
+        _log(f"set_listening_mode: effective_mode={effective_mode}, porcupine_available={porcupine_available}")
+        return {"mode": effective_mode, "porcupine_available": porcupine_available}
 
     def shutdown(self) -> None:
         """Release resources on server stop."""
@@ -454,6 +476,19 @@ def create_server() -> "tuple[mcp.server.fastmcp.FastMCP, VoiceServer]":  # type
         Returns {"listening": <current state>}.
         """
         return voice.toggle_listening_impl(enabled=enabled)
+
+    @app.tool()
+    def set_listening_mode(mode: str) -> dict:
+        """Switch between 'wake_word' and 'always_on' listening modes.
+
+        In wake_word mode, the mic listens for the configured wake word (Porcupine)
+        before activating VAD and recording.  In always_on mode, VAD is always active.
+
+        If Porcupine is not configured, requesting wake_word falls back to always_on.
+
+        Returns {"mode": effective_mode, "porcupine_available": bool}.
+        """
+        return voice.set_listening_mode_impl(mode=mode)
 
     return app, voice
 

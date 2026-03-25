@@ -466,3 +466,16 @@ class TestMCPToolRegistration:
             app, voice = create_server()
         tool_names = [t.name for t in asyncio.run(app.list_tools())]
         assert "toggle_listening" in tool_names
+
+    def test_set_listening_mode_tool_registered(self):
+        mock_tts = _make_mock_tts()
+        with patch('lazy_claude.server.TTSEngine', return_value=mock_tts), \
+             patch('lazy_claude.server.load_model', return_value=MagicMock()), \
+             patch('lazy_claude.server.load_vad_model', return_value=MagicMock()), \
+             patch('lazy_claude.server.ReferenceBuffer'), \
+             patch('lazy_claude.server.EchoCanceller'), \
+             patch('lazy_claude.server.ContinuousListener', return_value=_make_mock_listener()):
+            from lazy_claude.server import create_server
+            app, voice = create_server()
+        tool_names = [t.name for t in asyncio.run(app.list_tools())]
+        assert "set_listening_mode" in tool_names

@@ -514,6 +514,29 @@ class ContinuousListener:
         # Exposed so tests can invoke the callback directly without starting audio.
         self._callback: "Optional[Any]" = None
 
+        # --- Porcupine wake-word engine (Phase 3) ---
+        self._porcupine: "Optional[Any]" = None
+        key = os.environ.get("PORCUPINE_ACCESS_KEY")
+        path = os.environ.get("PORCUPINE_MODEL_PATH")
+        if key and path:
+            try:
+                import pvporcupine  # type: ignore[import-untyped]
+                self._porcupine = pvporcupine.create(access_key=key, keyword_paths=[path])
+                _log("Porcupine wake-word engine initialised.")
+            except Exception as e:
+                _log(f"Porcupine init failed: {e}")
+                self._porcupine = None
+
+        # Mode state machine: "wake_word" (waiting for keyword) or "active" (VAD listening)
+        self._mode: str = "wake_word" if self._porcupine is not None else "active"
+        self._active_since: "float | None" = None
+
+        # Wake-word-only mode: after one utterance, return to wake_word mode.
+        if self._porcupine is not None and os.environ.get("LAZY_CLAUDE_ALWAYS_ON") != "1":
+            self._wake_word_only_mode: bool = True
+        else:
+            self._wake_word_only_mode = False
+
         self._thread = threading.Thread(
             target=self._run, daemon=True, name="continuous-listener"
         )
@@ -576,6 +599,9 @@ class ContinuousListener:
             self._active.clear()
             self._reset_utterance_state()
             self.drain_queue()
+            # On deactivation, return to wake_word mode if Porcupine is available
+            if getattr(self, '_porcupine', None) is not None:
+                self._mode = "wake_word"
             _log("ContinuousListener: voice mode OFF.")
 
     @property
@@ -667,6 +693,21 @@ class ContinuousListener:
         """
         chunk_duration = CHUNK_SAMPLES / SAMPLE_RATE  # seconds per VAD chunk
 
+        def _play_ping_sd() -> None:
+            """Play a brief 440Hz tone via sounddevice to confirm wake word."""
+            try:
+                import sounddevice as _sd  # noqa: PLC0415
+                t = np.linspace(0, 0.08, int(0.08 * 24000), endpoint=False)
+                ping = (np.sin(2 * np.pi * 440 * t) * 0.3).astype(np.float32)
+                self._tts_active = True
+                try:
+                    _sd.play(ping, samplerate=24000, blocking=True)
+                finally:
+                    self._tts_active = False
+            except Exception as exc:
+                _log(f"WARNING: ping playback failed: {exc}")
+                self._tts_active = False
+
         def _callback(
             indata: np.ndarray, frames: int, _time_info, status
         ) -> None:
@@ -681,6 +722,22 @@ class ContinuousListener:
             if len(chunk_16k) != CHUNK_SAMPLES:
                 return
 
+            now = time.monotonic()
+
+            # --- Wake word mode: run Porcupine, not VAD ---
+            _porcupine = getattr(self, '_porcupine', None)
+            _mode = getattr(self, '_mode', 'active')
+            if _porcupine is not None and _mode == "wake_word":
+                pcm_int16 = (chunk_16k * 32767).clip(-32768, 32767).astype(np.int16)
+                result = _porcupine.process(pcm_int16)
+                if result >= 0:
+                    _play_ping_sd()
+                    self._reset_utterance_state()
+                    self._mode = "active"
+                    self._active_since = time.monotonic()
+                    _log("ContinuousListener: wake word detected — switching to active.")
+                return
+
             # ── AEC: pull reference and cancel echo ──
             if self._ref_buf is not None and self._echo_canceller is not None:
                 ref_chunk = self._ref_buf.read(CHUNK_SAMPLES)
@@ -689,7 +746,6 @@ class ContinuousListener:
                 processed = chunk_16k
 
             tts_active = self._tts_active
-            now = time.monotonic()
 
             # Check if we're in the post-TTS echo tail window
             in_echo_tail = (
@@ -738,6 +794,18 @@ class ContinuousListener:
                     self._accumulated_speech = chunk_duration
                     self._silence_started = None
                     self._utterance_chunks = [processed]
+                else:
+                    # Check 15s timeout while in WAITING state (not recording)
+                    _active_since = getattr(self, '_active_since', None)
+                    if (
+                        _active_since is not None
+                        and now - _active_since > 15.0
+                    ):
+                        _log("ContinuousListener: 15s timeout — returning to wake_word.")
+                        self._reset_utterance_state()
+                        if getattr(self, '_porcupine', None) is not None:
+                            self._mode = "wake_word"
+                            self._active_since = None
             else:
                 self._utterance_chunks.append(processed)
                 if is_speech:
@@ -763,6 +831,11 @@ class ContinuousListener:
                         self._utterance_chunks = []
                         self._accumulated_speech = 0.0
                         self._silence_started = None
+                        # After utterance stored: if wake_word_only mode, return to wake_word
+                        if getattr(self, '_wake_word_only_mode', False) and getattr(self, '_porcupine', None) is not None:
+                            self._reset_utterance_state()
+                            self._mode = "wake_word"
+                            self._active_since = None
 
         self._callback = _callback
         return _callback

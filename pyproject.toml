@@ -42,6 +42,7 @@ dev = [
     "pytest>=9.0.2",
 ]
 macos = ["pyobjc-framework-AVFoundation>=10.0"]
+wakeword = ["pvporcupine>=3.0"]
 
 [project.scripts]
 claude-voice = "lazy_claude.__main__:main"
