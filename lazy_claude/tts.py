@@ -57,6 +57,7 @@ except ImportError as _exc:  # pragma: no cover
 
 _SAMPLE_RATE = 24_000        # Hz — Kokoro outputs 24 kHz audio
 _VOICE = 'af_heart'          # Default voice
+_SPEED = 1.3                 # TTS playback speed (1.0 = normal, higher = faster)
 _REPO_ID = 'hexgrad/Kokoro-82M'
 
 # Type alias for ReferenceBuffer — imported lazily to avoid circular deps
@@ -176,7 +177,7 @@ class TTSEngine:
                 channels=1,
                 dtype='float32',
             ) as stream:
-                generator = self._pipeline(text, voice=_VOICE)
+                generator = self._pipeline(text, voice=_VOICE, speed=_SPEED)
                 for result in generator:
                     if self._stop_event.is_set():
                         break

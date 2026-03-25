@@ -575,9 +575,11 @@ class MacOSContinuousListener:
         self._vad = vad_model
         self._slot_lock = threading.Condition()
         self._pending: Optional[np.ndarray] = None
+        self._barge_in_candidate: Optional[np.ndarray] = None
         self._barge_in_event = threading.Event()
         self._stop_event = threading.Event()
         self._tts_active: bool = False
+        self._last_input_at: Optional[float] = None
         self._active = threading.Event()
 
         # Per-utterance state (written only by _process_chunk, single consumer thread)
@@ -586,6 +588,10 @@ class MacOSContinuousListener:
         self._accumulated_speech: float = 0.0
         self._silence_started: Optional[float] = None
         self._barge_in_frame_count: int = 0
+        self._barge_in_recording: bool = False
+        self._barge_in_chunks: list[np.ndarray] = []
+        self._barge_in_accumulated_speech: float = 0.0
+        self._barge_in_silence_started: Optional[float] = None
 
         # Use the shared backend and install tap
         self._backend = backend
@@ -647,6 +653,14 @@ class MacOSContinuousListener:
         self._barge_in_frame_count = 0
         self._recording = False
 
+    def _reset_barge_in_state(self) -> None:
+        """Clear any in-progress or buffered TTS interruption utterance."""
+        self._barge_in_frame_count = 0
+        self._barge_in_recording = False
+        self._barge_in_chunks = []
+        self._barge_in_accumulated_speech = 0.0
+        self._barge_in_silence_started = None
+
     def set_active(self, active: bool) -> None:
         """Enable or disable speech collection (voice mode toggle)."""
         if active:
@@ -656,6 +670,7 @@ class MacOSContinuousListener:
         else:
             self._active.clear()
             self._reset_utterance_state()
+            self._reset_barge_in_state()
             self.drain_queue()
             # On deactivation, return to wake_word mode if wake-word detection is available
             if getattr(self, '_porcupine', None) is not None:
@@ -669,15 +684,31 @@ class MacOSContinuousListener:
     def set_tts_playing(self, playing: bool) -> None:
         """Set the TTS-active flag for barge-in detection."""
         self._tts_active = playing
+        if not playing:
+            self._reset_barge_in_state()
 
     def clear_barge_in(self) -> None:
         """Reset the barge-in flag before a new TTS turn."""
         self._barge_in_event.clear()
+        self._reset_barge_in_state()
+        with self._slot_lock:
+            self._barge_in_candidate = None
 
     @property
     def barge_in(self) -> threading.Event:
         """Event set when barge-in speech is detected during TTS."""
         return self._barge_in_event
+
+    def get_last_input_at(self) -> Optional[float]:
+        """Return the monotonic timestamp of the latest detected speech frame."""
+        return self._last_input_at
+
+    def pop_barge_in_candidate(self) -> Optional[np.ndarray]:
+        """Return the next buffered interruption utterance, if any."""
+        with self._slot_lock:
+            audio = self._barge_in_candidate
+            self._barge_in_candidate = None
+            return audio
 
     def get_next_speech(self, timeout: float = 60.0) -> Optional[np.ndarray]:
         """Block until the next user utterance arrives, or *timeout* seconds.
@@ -771,27 +802,43 @@ class MacOSContinuousListener:
         tts_active = self._tts_active
 
         if tts_active:
-            # Barge-in detection: consecutive high-prob frames confirm real speech
             if is_speech:
-                self._barge_in_frame_count += 1
-                if self._barge_in_frame_count >= self.BARGE_IN_FRAMES:
-                    self._barge_in_event.set()
-                    self._tts_active = False
-                    self._barge_in_frame_count = 0
-                    # Start capturing the barge-in utterance immediately
-                    self._recording = True
-                    self._accumulated_speech = chunk_duration
-                    self._silence_started = None
-                    self._utterance_chunks = [chunk]
+                self._last_input_at = now
+                if not self._barge_in_recording:
+                    self._barge_in_frame_count += 1
+                    if self._barge_in_frame_count >= self.BARGE_IN_FRAMES:
+                        self._barge_in_recording = True
+                        self._barge_in_frame_count = 0
+                        self._barge_in_accumulated_speech = chunk_duration
+                        self._barge_in_silence_started = None
+                        self._barge_in_chunks = [chunk]
+                else:
+                    self._barge_in_chunks.append(chunk)
+                    self._barge_in_accumulated_speech += chunk_duration
+                    self._barge_in_silence_started = None
             else:
-                self._barge_in_frame_count = max(0, self._barge_in_frame_count - 1)
-            return  # discard chunk while TTS is playing
+                if self._barge_in_recording:
+                    self._barge_in_chunks.append(chunk)
+                    if self._barge_in_silence_started is None:
+                        self._barge_in_silence_started = now
+                    elif (
+                        now - self._barge_in_silence_started >= self.SILENCE_DURATION
+                        and self._barge_in_accumulated_speech >= self.MIN_SPEECH_DURATION
+                    ):
+                        audio = np.concatenate(self._barge_in_chunks).astype(np.float32)
+                        with self._slot_lock:
+                            self._barge_in_candidate = audio
+                        self._reset_barge_in_state()
+                else:
+                    self._barge_in_frame_count = max(0, self._barge_in_frame_count - 1)
+            return
 
         # Normal listening
         self._barge_in_frame_count = 0
 
         if not self._recording:
             if is_speech:
+                self._last_input_at = now
                 self._recording = True
                 self._accumulated_speech = chunk_duration
                 self._silence_started = None
@@ -811,6 +858,7 @@ class MacOSContinuousListener:
         else:
             self._utterance_chunks.append(chunk)
             if is_speech:
+                self._last_input_at = now
                 self._accumulated_speech += chunk_duration
                 self._silence_started = None
             else:
@@ -857,6 +905,7 @@ class MacOSTTSEngine:
     """
 
     _VOICE = 'af_heart'
+    _SPEED = 1.3
     _REPO_ID = 'hexgrad/Kokoro-82M'
 
     def __init__(self, backend: "AVAudioBackend") -> None:
@@ -918,7 +967,7 @@ class MacOSTTSEngine:
         completion handler on the last buffer so that speak() only returns
         after the audio is audibly done.
         """
-        generator = self._pipeline(text, voice=self._VOICE)
+        generator = self._pipeline(text, voice=self._VOICE, speed=self._SPEED)
 
         # Collect all valid chunks first so we know which one is last.
         chunks: list[np.ndarray] = []
