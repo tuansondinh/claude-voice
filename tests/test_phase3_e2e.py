@@ -598,7 +598,7 @@ class TestFallbackGateIntegration:
 
         # Fallback gate should have fired — VAD not called, no speech queued
         vad.assert_not_called()
-        assert listener._speech_queue.empty()
+        assert listener._pending is None
 
     def test_fallback_gate_threshold_is_class_attribute(self):
         """AEC_RESIDUAL_GATE_THRESHOLD should be accessible as class attribute."""

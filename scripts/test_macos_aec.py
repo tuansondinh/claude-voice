@@ -68,17 +68,40 @@ def main() -> None:
 
     # Step 5: Speak a test phrase
     test_phrase = (
-        "Hello, I am testing echo cancellation. "
-        "Please say something after this message ends."
+        "Hello, I am testing echo cancellation and device switching. "
+        "While I am speaking, please switch your audio output device — "
+        "for example, switch from speakers to headphones, or vice versa. "
+        "The engine should recover automatically and continue playing. "
+        "After I finish, please say something so we can verify the microphone still works."
     )
     print(f"[test_macos_aec] Speaking: {test_phrase!r}", flush=True)
 
-    # Signal TTS playing so barge-in detection works
+    # Signal TTS playing so barge-in detection works.
+    # Run TTS in a background thread so the main thread can watch for barge-in
+    # and call tts.stop() if the user interrupts.
+    import threading
+
+    listener.clear_barge_in()
     listener.set_tts_playing(True)
-    tts.speak(test_phrase)
+
+    tts_thread = threading.Thread(target=tts.speak, args=(test_phrase,), daemon=True)
+    tts_thread.start()
+
+    barged_in = False
+    while tts_thread.is_alive():
+        if listener.barge_in.wait(timeout=0.05):
+            print("[test_macos_aec] Barge-in detected! Stopping TTS…", flush=True)
+            tts.stop()
+            barged_in = True
+            break
+
+    tts_thread.join()
     listener.set_tts_playing(False)
 
-    print("[test_macos_aec] TTS finished. Waiting for your speech…", flush=True)
+    if barged_in:
+        print("[test_macos_aec] Barge-in succeeded. Capturing your speech…", flush=True)
+    else:
+        print("[test_macos_aec] TTS finished. Waiting for your speech…", flush=True)
     print("[test_macos_aec] (Speak now — you have 30 seconds)", flush=True)
 
     # Step 6: Wait for user speech

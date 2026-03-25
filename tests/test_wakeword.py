@@ -1,6 +1,6 @@
-"""Tests for Phase 3: Porcupine wake word + wake-word-only mode.
+"""Tests for wake word + wake-word-only mode.
 
-All tests mock pvporcupine so no real Porcupine library or access key is needed.
+All tests mock the wake-word detector so no real model package is needed.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ def _make_listener_with_porcupine(
     vad_speech_prob: float = 0.0,
     wake_word_only: bool | None = None,
 ):
-    """Build a MacOSContinuousListener with Porcupine mocked in.
+    """Build a MacOSContinuousListener with wake-word detection mocked in.
 
     Returns (listener, porcupine_mock).
     """
@@ -52,14 +52,7 @@ def _make_listener_with_porcupine(
 
     vad_model = _make_vad_model(vad_speech_prob)
 
-    # Patch pvporcupine.create so __init__ picks it up
-    mock_pvporcupine = MagicMock()
-    mock_pvporcupine.create = MagicMock(return_value=porcupine_mock)
-
-    with patch.dict('os.environ', {
-        'PORCUPINE_ACCESS_KEY': 'test-key',
-        'PORCUPINE_MODEL_PATH': '/fake/model.ppn',
-    }), patch.dict('sys.modules', {'pvporcupine': mock_pvporcupine}):
+    with patch('lazy_claude.av_audio.create_wakeword_detector', return_value=porcupine_mock):
         listener = MacOSContinuousListener(vad_model, backend=backend_mock)
 
     if wake_word_only is not None:
@@ -69,7 +62,7 @@ def _make_listener_with_porcupine(
 
 
 def _make_listener_without_porcupine(vad_speech_prob: float = 0.0):
-    """Build a MacOSContinuousListener without Porcupine configured."""
+    """Build a MacOSContinuousListener without a wake-word detector."""
     from lazy_claude.av_audio import MacOSContinuousListener
 
     backend_mock = MagicMock()
@@ -79,18 +72,8 @@ def _make_listener_without_porcupine(vad_speech_prob: float = 0.0):
 
     vad_model = _make_vad_model(vad_speech_prob)
 
-    # No PORCUPINE_ACCESS_KEY in environment
-    with patch.dict('os.environ', {}, clear=False):
-        import os
-        orig_key = os.environ.pop('PORCUPINE_ACCESS_KEY', None)
-        orig_path = os.environ.pop('PORCUPINE_MODEL_PATH', None)
-        try:
-            listener = MacOSContinuousListener(vad_model, backend=backend_mock)
-        finally:
-            if orig_key is not None:
-                os.environ['PORCUPINE_ACCESS_KEY'] = orig_key
-            if orig_path is not None:
-                os.environ['PORCUPINE_MODEL_PATH'] = orig_path
+    with patch('lazy_claude.av_audio.create_wakeword_detector', return_value=None):
+        listener = MacOSContinuousListener(vad_model, backend=backend_mock)
 
     return listener, backend_mock
 
@@ -377,14 +360,10 @@ class TestWakeWordOnlyModeDefault:
         vad_model = _make_vad_model()
 
         porcupine_mock = _make_mock_porcupine()
-        mock_pvporcupine = MagicMock()
-        mock_pvporcupine.create = MagicMock(return_value=porcupine_mock)
 
         with patch.dict('os.environ', {
-            'PORCUPINE_ACCESS_KEY': 'test-key',
-            'PORCUPINE_MODEL_PATH': '/fake/model.ppn',
             'LAZY_CLAUDE_ALWAYS_ON': '1',
-        }), patch.dict('sys.modules', {'pvporcupine': mock_pvporcupine}):
+        }), patch('lazy_claude.av_audio.create_wakeword_detector', return_value=porcupine_mock):
             listener = MacOSContinuousListener(vad_model, backend=backend_mock)
 
         assert listener._wake_word_only_mode is False
@@ -401,6 +380,8 @@ class TestWakeWordOnlyModeDefault:
 
 def _ensure_server_module_imported():
     """Ensure lazy_claude.server is importable by mocking sounddevice if needed."""
+    import importlib
+    import importlib.util
     import sys
     from unittest.mock import MagicMock
 
@@ -409,11 +390,11 @@ def _ensure_server_module_imported():
         sys.modules['sounddevice'] = MagicMock()
     if 'lazy_claude.server' not in sys.modules:
         # Mock all heavy deps before importing the server module
-        for mod in ['sounddevice', 'onnxruntime', 'pywhispercpp']:
-            if mod not in sys.modules:
+        for mod in ['sounddevice', 'kokoro', 'pywhispercpp']:
+            if mod not in sys.modules and importlib.util.find_spec(mod) is None:
                 sys.modules[mod] = MagicMock()
         try:
-            import lazy_claude.server  # noqa: F401
+            importlib.import_module('lazy_claude.server')
         except Exception:
             pass
 
@@ -424,6 +405,7 @@ _ensure_server_module_imported()
 
 def _make_server_with_listener(listener_mock):
     """Build a VoiceServer with a pre-wired listener mock (no audio hardware)."""
+    import importlib
     from unittest.mock import patch, MagicMock
 
     mock_tts = MagicMock()
@@ -431,12 +413,13 @@ def _make_server_with_listener(listener_mock):
     mock_tts.speak = MagicMock()
     mock_tts.stop = MagicMock()
 
-    with patch('lazy_claude.server.TTSEngine', return_value=mock_tts), \
-         patch('lazy_claude.server.load_model', return_value=MagicMock()), \
-         patch('lazy_claude.server.load_vad_model', return_value=MagicMock()), \
-         patch('lazy_claude.server.ReferenceBuffer'), \
-         patch('lazy_claude.server.EchoCanceller'), \
-         patch('lazy_claude.server.ContinuousListener', return_value=listener_mock):
+    server_mod = importlib.import_module('lazy_claude.server')
+    with patch.object(server_mod, 'TTSEngine', return_value=mock_tts), \
+         patch.object(server_mod, 'load_model', return_value=MagicMock()), \
+         patch.object(server_mod, 'load_vad_model', return_value=MagicMock()), \
+         patch.object(server_mod, 'ReferenceBuffer'), \
+         patch.object(server_mod, 'EchoCanceller'), \
+         patch.object(server_mod, 'ContinuousListener', return_value=listener_mock):
         from lazy_claude.server import VoiceServer
         server = VoiceServer()
     server.tts = mock_tts
@@ -493,6 +476,16 @@ class TestSetListeningMode:
         assert result["mode"] == "always_on"
         assert result["porcupine_available"] is True
 
+    def test_set_always_on_mode_updates_listener_mode(self):
+        """Switching to always_on sets listener._mode to 'active'."""
+        listener = self._make_listener_with_porcupine_mock()
+        listener._mode = "wake_word"
+        server = _make_server_with_listener(listener)
+
+        server.set_listening_mode_impl(mode="always_on")
+
+        assert listener._mode == "active"
+
     def test_set_wake_word_mode_updates_listener_mode(self):
         """Switching to wake_word sets listener._mode to 'wake_word'."""
         listener = self._make_listener_with_porcupine_mock()
@@ -521,6 +514,15 @@ class TestSetListeningMode:
 
         assert listener._wake_word_only_mode is False
 
+    def test_set_always_on_mode_calls_reset_utterance_state(self):
+        """Switching to always_on also clears any in-flight utterance state."""
+        listener = self._make_listener_with_porcupine_mock()
+        server = _make_server_with_listener(listener)
+
+        server.set_listening_mode_impl(mode="always_on")
+
+        listener._reset_utterance_state.assert_called()
+
 
 # ---------------------------------------------------------------------------
 # set_listening_mode MCP tool registration
@@ -530,6 +532,7 @@ class TestSetListeningModeToolRegistration:
     def test_set_listening_mode_tool_registered(self):
         """set_listening_mode is registered as an MCP tool."""
         import asyncio
+        import importlib
         from unittest.mock import patch, MagicMock
 
         mock_tts = MagicMock()
@@ -540,12 +543,13 @@ class TestSetListeningModeToolRegistration:
         mock_listener._mode = "active"
         mock_listener._reset_utterance_state = MagicMock()
 
-        with patch('lazy_claude.server.TTSEngine', return_value=mock_tts), \
-             patch('lazy_claude.server.load_model', return_value=MagicMock()), \
-             patch('lazy_claude.server.load_vad_model', return_value=MagicMock()), \
-             patch('lazy_claude.server.ReferenceBuffer'), \
-             patch('lazy_claude.server.EchoCanceller'), \
-             patch('lazy_claude.server.ContinuousListener', return_value=mock_listener):
+        server_mod = importlib.import_module('lazy_claude.server')
+        with patch.object(server_mod, 'TTSEngine', return_value=mock_tts), \
+             patch.object(server_mod, 'load_model', return_value=MagicMock()), \
+             patch.object(server_mod, 'load_vad_model', return_value=MagicMock()), \
+             patch.object(server_mod, 'ReferenceBuffer'), \
+             patch.object(server_mod, 'EchoCanceller'), \
+             patch.object(server_mod, 'ContinuousListener', return_value=mock_listener):
             from lazy_claude.server import create_server
             app, voice = create_server()
 

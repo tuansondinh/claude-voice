@@ -587,6 +587,25 @@ The system is **fail-safe**: if any step of macOS initialization fails, the serv
 
 ---
 
+## Why Python (not TypeScript)
+
+Python was chosen primarily for **macOS-native audio integration and DSP ergonomics** — not because STT, TTS, or VAD are unavailable in TypeScript. Node.js alternatives exist for those today, but the stack around AVFoundation bridging and low-level real-time audio remains significantly less mature.
+
+| Concern | Library | Assessment |
+|---|---|---|
+| **Speech-to-text** | `pywhispercpp` | `whisper.cpp` now has official JavaScript bindings and several Node packages (`whisper-node`, `@remotion/install-whisper-cpp`). The Node ecosystem is younger and fragmented, but viable. Python wins on consolidation, not exclusivity. |
+| **Text-to-speech** | `kokoro` | `kokoro-js` exists on npm with documented ONNX usage (see [model card](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX)). Python is not the only option, but `kokoro` is more battle-tested at the time of writing. |
+| **Voice Activity Detection** | `onnxruntime` (Silero VAD) | Real Node alternatives exist: `@livekit/agents-plugin-silero`, `@ricky0123/vad`, `onnxruntime-node`. The Node VAD ecosystem is credible and production-used. |
+| **macOS AVAudioEngine** | `pyobjc-framework-AVFoundation` | PyObjC is the most complete and stable bridge to Apple frameworks. Node options (`nodobjc`, `ffi-napi`, custom Swift/N-API addons) exist but are stale or require significant low-level work. **This is the clearest Python advantage.** |
+| **Audio I/O** | `sounddevice` | `naudiodon`, `node-portaudio`, `node-core-audio` all exist. Node alternatives are more stream-oriented than callback-oriented — the callback control needed for real-time AEC is harder to achieve reliably. Python is a safer choice here. |
+| **Numeric DSP (AEC)** | `numpy` | No NumPy-level equivalent in Node. Building blocks (`ml-matrix`, `ndarray`, `ndarray-fft`, `fft.js`) exist but are less cohesive. Porting the PBFDLMS filter to TypeScript is possible but offers no quality gain. |
+
+**The real deciding factors** were AVFoundation bridging and real-time audio callback ergonomics — not STT/TTS/VAD availability. A TypeScript server is theoretically feasible today, but would require maintaining fragile native bindings for macOS audio with no ecosystem benefit.
+
+The MCP server protocol itself is language-agnostic, so Python for the server and TypeScript for the npm launcher (`package.json` / `npx @tuan_son.dinh/claude-voice`) is the natural split: npm for easy distribution, Python for audio.
+
+---
+
 ## Future Improvements
 
 1. **Resume TTS after device change** — Currently cancelled; could store state and retry

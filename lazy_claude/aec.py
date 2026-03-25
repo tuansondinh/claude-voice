@@ -557,15 +557,18 @@ class EchoCanceller:
 
         # Delay estimation state
         self._delay_estimated: bool = False
-        self._estimated_delay: int = 0
+        # Default ~50ms (800 samples at 16kHz) — typical laptop speaker→mic path.
+        # Cross-correlation refines this once enough frames are collected.
+        self._estimated_delay: int = 800
         # Delay compensation buffer (stores delayed reference samples)
         self._delay_buf = np.zeros(
             filter_length + chunk_size, dtype=np.float32
         )
 
-        # First-call reference snapshot for delay estimation
-        self._first_mic: Optional[np.ndarray] = None
-        self._first_ref: Optional[np.ndarray] = None
+        # Accumulate frames for delay estimation (need enough signal for good xcorr)
+        self._delay_est_mic_chunks: list[np.ndarray] = []
+        self._delay_est_ref_chunks: list[np.ndarray] = []
+        self._delay_est_frames_needed: int = 15  # ~480ms at 32ms/chunk
 
         # Residual Echo Suppression (RES) — spectral subtraction
         self._res_enabled: bool = enable_res
@@ -608,22 +611,36 @@ class EchoCanceller:
             # Passthrough if unexpected length
             return mic_chunk.copy()
 
-        # --- Delay estimation on first call ---
+        # --- Delay estimation: accumulate frames then refine ---
         if not self._delay_estimated:
-            if self._first_mic is None:
-                self._first_mic = mic_chunk.copy()
-                self._first_ref = ref_chunk.copy()
-            else:
-                # Estimate delay from accumulated first frames
-                combined_mic = np.concatenate([self._first_mic, mic_chunk])
-                combined_ref = np.concatenate([self._first_ref, ref_chunk])
-                self._estimated_delay = estimate_delay(
-                    combined_mic, combined_ref,
-                    max_delay=min(self.filter_length, 2048)
-                )
-                self._delay_estimated = True
-                _log(f"Estimated acoustic delay: {self._estimated_delay} samples "
-                     f"({self._estimated_delay / SAMPLE_RATE * 1000:.1f} ms)")
+            self._delay_est_mic_chunks.append(mic_chunk.copy())
+            self._delay_est_ref_chunks.append(ref_chunk.copy())
+            if len(self._delay_est_mic_chunks) >= self._delay_est_frames_needed:
+                combined_mic = np.concatenate(self._delay_est_mic_chunks)
+                combined_ref = np.concatenate(self._delay_est_ref_chunks)
+                # Only refine if reference has actual signal (TTS was playing)
+                ref_power = float(np.mean(combined_ref.astype(np.float64) ** 2))
+                if ref_power > SILENCE_POWER_THRESHOLD:
+                    delay = estimate_delay(
+                        combined_mic, combined_ref,
+                        max_delay=min(self.filter_length, 2048)
+                    )
+                    # Sanity check: delay should be reasonable (0-150ms)
+                    if 0 <= delay <= 2400:
+                        self._estimated_delay = delay
+                    _log(f"Estimated acoustic delay: {delay} samples "
+                         f"({delay / SAMPLE_RATE * 1000:.1f} ms), "
+                         f"using: {self._estimated_delay} samples")
+                    self._delay_estimated = True
+                    # Free accumulation buffers once estimation succeeds.
+                    self._delay_est_mic_chunks = []
+                    self._delay_est_ref_chunks = []
+                else:
+                    # No useful reference yet. Keep retrying with a fresh window
+                    # so the first real TTS playback can still drive estimation.
+                    _log("Delay estimation: ref silent, retrying with next frames")
+                    self._delay_est_mic_chunks = []
+                    self._delay_est_ref_chunks = []
 
         # --- Shift reference through delay compensation buffer ---
         delay = self._estimated_delay
@@ -767,8 +784,8 @@ class EchoCanceller:
         while preserving the learned filter coefficients for fast re-convergence.
         """
         self._delay_estimated = False
-        self._first_mic = None
-        self._first_ref = None
+        self._delay_est_mic_chunks = []
+        self._delay_est_ref_chunks = []
         self._delay_buf[:] = 0.0
 
     def reset_full(self) -> None:

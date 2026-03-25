@@ -195,18 +195,18 @@ class TTSEngine:
                     if chunk.size == 0:
                         continue
 
+                    # Push chunk into AEC reference buffer BEFORE playing it,
+                    # so the reference is available by the time the mic picks
+                    # up the echo. We push the original 24kHz chunk; the
+                    # ReferenceBuffer handles 24k→16k resampling internally.
+                    if self._ref_buf is not None:
+                        self._ref_buf.write(chunk)
+
                     if self._needs_resample:
                         chunk = self._resample(chunk, _SAMPLE_RATE, playback_rate)
 
                     # sounddevice OutputStream.write expects shape (frames, channels)
                     stream.write(chunk.reshape(-1, 1))
-
-                    # Push raw chunk (before any resampling change) into AEC reference
-                    # buffer so the echo canceller can subtract the speaker signal.
-                    # We push the flat float32 chunk at _SAMPLE_RATE (24 kHz); the
-                    # ReferenceBuffer handles 24k→16k resampling internally.
-                    if self._ref_buf is not None:
-                        self._ref_buf.write(chunk)
 
                     if self._stop_event.is_set():
                         break

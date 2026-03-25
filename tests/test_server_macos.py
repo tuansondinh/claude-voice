@@ -32,7 +32,7 @@ def _stub(name: str) -> MagicMock:
     return m
 
 
-for _mod in ('sounddevice', 'kokoro', 'onnxruntime', 'AVFoundation', 'Foundation', 'objc'):
+for _mod in ('sounddevice', 'kokoro', 'AVFoundation', 'Foundation', 'objc'):
     if _mod not in sys.modules:
         _stub(_mod)
 
@@ -156,6 +156,9 @@ def _build_server_via_init(*, platform_str='linux', av_available=False,
             s._listener = mock_listener
             s.tts = mock_tts
 
+    mock_listener.reset_mock()
+    mock_tts.reset_mock()
+
     return s, mock_tts, mock_listener
 
 
@@ -225,8 +228,8 @@ class TestAskSingleMacOSPath:
             f"Expected no 0.8s sleep on macOS path, but got sleep calls: {sleep_calls}"
         )
 
-    def test_drain_queue_not_called_after_tts_on_macos_path(self):
-        """drain_queue should NOT be called after TTS on macOS path."""
+    def test_drain_queue_called_after_speech_on_macos_path(self):
+        """drain_queue should still run after a successful speech capture on macOS."""
         audio = np.zeros(16_000, dtype=np.float32)
         s, mock_tts, mock_listener = _build_voice_server_directly(
             use_macos_aec=True, next_speech=audio
@@ -240,7 +243,7 @@ class TestAskSingleMacOSPath:
             mock_listener.drain_queue.reset_mock()
             s._ask_single("Test question?")
 
-        mock_listener.drain_queue.assert_not_called()
+        mock_listener.drain_queue.assert_called_once()
 
     def test_tts_still_called_on_macos_path(self):
         """TTS speak must still be called even on macOS path."""

@@ -79,6 +79,7 @@ def _make_server(mock_tts=None, next_speech=None):
     s.tts = mock_tts
     # Ensure the mock listener is directly accessible
     s._listener = mock_listener
+    mock_listener.reset_mock()
     return s, mock_tts, mock_listener
 
 
@@ -146,6 +147,11 @@ class TestToggleListening:
         server.toggle_listening_impl(enabled=False)
         server.toggle_listening_impl(enabled=True)
         assert server.listening is True
+
+    def test_toggle_on_does_not_activate_listener_until_voice_turn(self):
+        server, _, mock_listener = _make_server()
+        server.toggle_listening_impl(enabled=True)
+        mock_listener.set_active.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +273,55 @@ class TestAskUserVoiceSuccess:
         assert "A: Paris" in result
         assert "Q: Answer to everything?" in result
         assert "A: 42" in result
+
+    def test_trailing_over_keyword_is_removed_from_answer(self):
+        audio = self._dummy_audio()
+        server, mock_tts, mock_listener = _make_server(next_speech=audio)
+        with patch('lazy_claude.server.transcribe',
+                   return_value=_make_transcribe_result("deploy it now over")):
+            result = server.ask_user_voice_impl(questions=["What should I do?"])
+        assert "A: deploy it now" in result
+        assert "A: deploy it now over" not in result
+
+    def test_trailing_over_keyword_is_case_insensitive(self):
+        audio = self._dummy_audio()
+        server, mock_tts, mock_listener = _make_server(next_speech=audio)
+        with patch('lazy_claude.server.transcribe',
+                   return_value=_make_transcribe_result("ship it OVER.")):
+            result = server.ask_user_voice_impl(questions=["Status?"])
+        assert "A: ship it" in result
+        assert "OVER" not in result
+
+    def test_pause_without_over_waits_for_continuation_then_finishes(self):
+        audio = self._dummy_audio()
+        server, mock_tts, mock_listener = _make_server()
+        mock_listener.get_next_speech.side_effect = [audio, None]
+        with patch('lazy_claude.server.transcribe',
+                   return_value=_make_transcribe_result("first part")):
+            result = server.ask_user_voice_impl(questions=["Continue?"])
+        assert "A: first part" in result
+        assert mock_listener.get_next_speech.call_args_list[0].kwargs["timeout"] == 60.0
+        assert mock_listener.get_next_speech.call_args_list[1].kwargs["timeout"] == 10.0
+
+    def test_multiple_segments_are_joined_before_timeout(self):
+        audio = self._dummy_audio()
+        server, mock_tts, mock_listener = _make_server()
+        mock_listener.get_next_speech.side_effect = [audio, audio, None]
+        with patch('lazy_claude.server.transcribe', side_effect=[
+            _make_transcribe_result("first part"),
+            _make_transcribe_result("second part"),
+        ]):
+            result = server.ask_user_voice_impl(questions=["Continue?"])
+        assert "A: first part second part" in result
+
+    def test_listener_is_only_active_during_voice_turn(self):
+        audio = self._dummy_audio()
+        server, mock_tts, mock_listener = _make_server(next_speech=audio)
+        with patch('lazy_claude.server.transcribe',
+                   return_value=_make_transcribe_result("ready")):
+            server.ask_user_voice_impl(questions=["Status?"])
+        assert mock_listener.set_active.call_args_list[0].args == (True,)
+        assert mock_listener.set_active.call_args_list[-1].args == (False,)
 
     def test_empty_transcription_returned_verbatim(self):
         """Empty transcription should still be returned, not dropped."""

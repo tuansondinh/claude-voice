@@ -30,6 +30,8 @@ from typing import Any, Literal, Optional
 
 import numpy as np
 
+from lazy_claude.wakeword import create_wakeword_detector
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -73,7 +75,17 @@ class SileroVAD:
     """
 
     def __init__(self, model_path: Path) -> None:
-        import onnxruntime as ort  # lazy import — avoid polluting startup
+        import importlib
+        import sys
+        from unittest.mock import Mock
+
+        # Some tests stub heavy native deps by placing MagicMock objects in
+        # sys.modules. When the live VAD tests run later in the same process,
+        # recover the real onnxruntime module here instead of using the stub.
+        ort = importlib.import_module("onnxruntime")
+        if isinstance(ort, Mock):
+            sys.modules.pop("onnxruntime", None)
+            ort = importlib.import_module("onnxruntime")
 
         opts = ort.SessionOptions()
         opts.inter_op_num_threads = 1
@@ -182,7 +194,7 @@ class VadStateMachine:
 
     def __init__(
         self,
-        silence_duration: float = 1.5,
+        silence_duration: float = 1.0,
         min_speech_duration: float = 0.5,
         no_speech_timeout: float = 15.0,
         sample_rate: int = SAMPLE_RATE,
@@ -306,7 +318,7 @@ def _resample_to_16k(audio: np.ndarray, from_rate: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def record_audio(
-    silence_duration: float = 1.5,
+    silence_duration: float = 1.0,
     min_speech_duration: float = 0.5,
     no_speech_timeout: float = 15.0,
     vad_model: SileroVAD | None = None,
@@ -453,7 +465,7 @@ class ContinuousListener:
     BARGE_IN_FRAMES: int = 3            # consecutive high-prob frames to confirm barge-in
 
     # Utterance segmentation
-    SILENCE_DURATION: float = 1.5       # seconds of trailing silence to stop
+    SILENCE_DURATION: float = 1.0       # seconds of trailing silence to stop
     MIN_SPEECH_DURATION: float = 0.5    # minimum speech before a stop is honoured
 
     # Fallback gate: if AEC residual RMS power exceeds this during TTS → suppress chunk.
@@ -514,18 +526,15 @@ class ContinuousListener:
         # Exposed so tests can invoke the callback directly without starting audio.
         self._callback: "Optional[Any]" = None
 
-        # --- Porcupine wake-word engine (Phase 3) ---
+        # --- Wake-word engine ---
         self._porcupine: "Optional[Any]" = None
-        key = os.environ.get("PORCUPINE_ACCESS_KEY")
-        path = os.environ.get("PORCUPINE_MODEL_PATH")
-        if key and path:
-            try:
-                import pvporcupine  # type: ignore[import-untyped]
-                self._porcupine = pvporcupine.create(access_key=key, keyword_paths=[path])
-                _log("Porcupine wake-word engine initialised.")
-            except Exception as e:
-                _log(f"Porcupine init failed: {e}")
-                self._porcupine = None
+        try:
+            self._porcupine = create_wakeword_detector()
+            if self._porcupine is not None:
+                _log("openWakeWord wake-word engine initialised.")
+        except Exception as e:
+            _log(f"openWakeWord init failed: {e}")
+            self._porcupine = None
 
         # Mode state machine: "wake_word" (waiting for keyword) or "active" (VAD listening)
         self._mode: str = "wake_word" if self._porcupine is not None else "active"
@@ -599,7 +608,7 @@ class ContinuousListener:
             self._active.clear()
             self._reset_utterance_state()
             self.drain_queue()
-            # On deactivation, return to wake_word mode if Porcupine is available
+            # On deactivation, return to wake_word mode if wake-word detection is available
             if getattr(self, '_porcupine', None) is not None:
                 self._mode = "wake_word"
             _log("ContinuousListener: voice mode OFF.")
@@ -651,6 +660,11 @@ class ContinuousListener:
     def stop(self) -> None:
         """Stop the background listener thread."""
         self._stop_event.set()
+        if getattr(self, '_porcupine', None) is not None:
+            try:
+                self._porcupine.delete()
+            except Exception:
+                pass
         _log("ContinuousListener stop requested.")
 
     def _handle_device_change(self) -> None:
@@ -724,7 +738,7 @@ class ContinuousListener:
 
             now = time.monotonic()
 
-            # --- Wake word mode: run Porcupine, not VAD ---
+            # --- Wake word mode: run the detector, not VAD ---
             _porcupine = getattr(self, '_porcupine', None)
             _mode = getattr(self, '_mode', 'active')
             if _porcupine is not None and _mode == "wake_word":

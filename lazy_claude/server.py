@@ -20,6 +20,7 @@ toggle_listening(enabled: bool) -> dict
 
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import time
@@ -35,24 +36,23 @@ from lazy_claude.stdout_guard import get_mcp_stdout  # noqa: E402 (intentional e
 # ---------------------------------------------------------------------------
 # Canonical environment variable names
 # ---------------------------------------------------------------------------
-# These are the ONLY env var names used by lazy-claude.  Do not introduce
-# alternative spellings; Phase 3 (Porcupine wake word) reads these directly.
-
-# Picovoice access key for Porcupine wake-word engine.
-ENV_PORCUPINE_ACCESS_KEY = "PORCUPINE_ACCESS_KEY"
-
-# Path to a custom Porcupine .ppn model file (optional — uses built-in
-# "hey claude" keyword when not set).
-ENV_PORCUPINE_MODEL_PATH = "PORCUPINE_MODEL_PATH"
-
-# Set to "1" to keep the mic always-on even when Porcupine is configured.
-# Default (unset or "0"): wake-word-only mode when Porcupine is available.
+# Set to "1" to keep the mic always-on even when wake-word detection is configured.
+# Default (unset or "0"): wake-word-only mode when a detector is available.
 ENV_LAZY_CLAUDE_ALWAYS_ON = "LAZY_CLAUDE_ALWAYS_ON"
+_VOICE_SUBMIT_KEYWORD_RE = re.compile(r"(?i)\bover\b[\s.!?,:;]*$")
+_INITIAL_RESPONSE_TIMEOUT = 60.0
+_CONTINUATION_RESPONSE_TIMEOUT = 5.0
 
 
 # All logging goes to stderr.
 def _log(msg: str) -> None:
     print(f"[lazy-claude server] {msg}", file=sys.stderr, flush=True)
+
+
+def _strip_voice_submit_keyword(text: str) -> tuple[str, bool]:
+    """Strip a trailing voice submit keyword such as 'OVER'."""
+    stripped = _VOICE_SUBMIT_KEYWORD_RE.sub("", text).strip()
+    return stripped, stripped != text.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +116,8 @@ class VoiceServer:
             self._calibrate_aec()
 
         self.listening: bool = True
+        if self.listening:
+            self._listener.set_active(True)
         self.busy: bool = False
         self._lock = threading.Lock()
         _log("VoiceServer ready.")
@@ -225,9 +227,10 @@ class VoiceServer:
     # ------------------------------------------------------------------
 
     def toggle_listening_impl(self, *, enabled: bool) -> dict[str, Any]:
-        """Enable or disable microphone recording (voice mode toggle)."""
+        """Enable or disable whether voice turns may capture microphone input."""
         self.listening = enabled
-        self._listener.set_active(enabled)
+        if not enabled:
+            self._listener.set_active(False)
         _log(f"Listening {'enabled' if enabled else 'disabled'}.")
         return {"listening": enabled}
 
@@ -266,8 +269,11 @@ class VoiceServer:
             self.busy = True
 
         try:
+            if self.listening:
+                self._listener.set_active(True)
             return self._run_qa_session(questions)
         finally:
+            self._listener.set_active(False)
             with self._lock:
                 self.busy = False
 
@@ -281,14 +287,15 @@ class VoiceServer:
     def _ask_single(self, question: str) -> str:
         """Speak one question via TTS (with barge-in), then transcribe answer.
 
-        On macOS path: system AEC handles echo instantly — no post-TTS sleep or drain.
-        On fallback path: wait 0.8s for echo tail, then drain residual echo.
+        The listener segments audio after ~1.5s of silence. At the server layer
+        we keep the answer open for up to 5s between segments so the user can
+        pause naturally. A segment ending in ``OVER`` submits immediately.
+
+        On macOS path: system AEC handles echo instantly — no post-TTS sleep
+        or drain. On fallback path: wait 0.8s for echo tail, then drain
+        residual echo.
         """
         _log(f"Speaking question: {question!r}")
-
-        # Ensure the listener is active (mic collecting speech).
-        if not self._listener.is_active:
-            self._listener.set_active(True)
 
         # Prepare listener for this TTS turn
         self._listener.clear_barge_in()
@@ -320,17 +327,30 @@ class VoiceServer:
             _log("Listening disabled — skipping mic recording.")
             return f"Q: {question}\nA: (skipped — listening paused)"
 
+        answer_parts: list[str] = []
+        accepted_any_segment = False
+        segment_timeout = _INITIAL_RESPONSE_TIMEOUT
+
         # STT loop: skip utterances that are likely noise (high no_speech_prob)
         while True:
-            # Wait for the user's spoken response from the always-on listener
-            _log("Waiting for user speech…")
+            if accepted_any_segment:
+                _log(
+                    f"Waiting for continuation speech (timeout={segment_timeout:.1f}s)…"
+                )
+            else:
+                _log("Waiting for user speech…")
             try:
-                audio = self._listener.get_next_speech(timeout=60.0)
+                audio = self._listener.get_next_speech(timeout=segment_timeout)
             except Exception as exc:
                 _log(f"ERROR: mic/listener error: {exc}")
                 return f"Q: {question}\nA: (error — mic failed: {exc})"
 
             if audio is None:
+                if accepted_any_segment:
+                    answer = " ".join(part for part in answer_parts if part).strip()
+                    _log("No continuation detected — finalising accumulated answer.")
+                    return f"Q: {question}\nA: {answer}"
+
                 _log("No speech detected — timed out.")
                 return f"Q: {question}\nA: (no response — timed out)"
 
@@ -348,7 +368,17 @@ class VoiceServer:
                 )
                 continue
 
-            return f"Q: {question}\nA: {result.text}"
+            accepted_any_segment = True
+            answer_text, used_submit_keyword = _strip_voice_submit_keyword(result.text)
+            if answer_text or not answer_parts:
+                answer_parts.append(answer_text)
+
+            if used_submit_keyword:
+                _log("Voice submit keyword detected: OVER")
+                answer = " ".join(part for part in answer_parts if part).strip()
+                return f"Q: {question}\nA: {answer}"
+
+            segment_timeout = _CONTINUATION_RESPONSE_TIMEOUT
 
     def _speak_safe(self, text: str) -> None:
         """Run TTS, catching all exceptions so the thread never crashes."""
@@ -364,7 +394,7 @@ class VoiceServer:
     def set_listening_mode_impl(self, *, mode: str) -> dict:
         """Switch between 'wake_word' and 'always_on' listening modes.
 
-        Phase 3 implements this for real (Porcupine integration).  The spec
+        Phase 3 implements this for real (wake-word integration).  The spec
         is defined here so Phase 2 can rely on the interface.
 
         Parameters
@@ -379,10 +409,10 @@ class VoiceServer:
 
             * ``effective_mode`` — the mode actually entered, which MAY differ
               from ``mode`` when the requested mode is unavailable.  For
-              example, requesting ``"wake_word"`` when Porcupine is not
+              example, requesting ``"wake_word"`` when the detector is not
               installed yields ``effective_mode="always_on"``.
-            * ``porcupine_available`` — True when the Porcupine engine is
-              loaded and the wake-word model is ready.
+            * ``porcupine_available`` — compatibility field; True when a
+              wake-word detector is loaded and ready.
 
         Notes
         -----
@@ -396,7 +426,7 @@ class VoiceServer:
         )
 
         if mode == "wake_word" and not porcupine_available:
-            _log("WARNING: wake_word mode requested but Porcupine not available — falling back to always_on.")
+            _log("WARNING: wake_word mode requested but no wake-word detector is available — falling back to always_on.")
             effective_mode = "always_on"
         else:
             effective_mode = mode
@@ -405,12 +435,14 @@ class VoiceServer:
         if hasattr(self._listener, '_wake_word_only_mode'):
             self._listener._wake_word_only_mode = (effective_mode == "wake_word")
 
-        # If switching to wake_word, reset utterance state and set mode
-        if effective_mode == "wake_word":
-            if hasattr(self._listener, '_reset_utterance_state'):
-                self._listener._reset_utterance_state()
-            if hasattr(self._listener, '_mode'):
-                self._listener._mode = "wake_word"
+        if hasattr(self._listener, '_reset_utterance_state'):
+            self._listener._reset_utterance_state()
+
+        if hasattr(self._listener, '_mode'):
+            self._listener._mode = "wake_word" if effective_mode == "wake_word" else "active"
+
+        if hasattr(self._listener, '_active_since'):
+            self._listener._active_since = None
 
         _log(f"set_listening_mode: effective_mode={effective_mode}, porcupine_available={porcupine_available}")
         return {"mode": effective_mode, "porcupine_available": porcupine_available}
@@ -481,10 +513,10 @@ def create_server() -> "tuple[mcp.server.fastmcp.FastMCP, VoiceServer]":  # type
     def set_listening_mode(mode: str) -> dict:
         """Switch between 'wake_word' and 'always_on' listening modes.
 
-        In wake_word mode, the mic listens for the configured wake word (Porcupine)
+        In wake_word mode, the mic listens for the configured wake word
         before activating VAD and recording.  In always_on mode, VAD is always active.
 
-        If Porcupine is not configured, requesting wake_word falls back to always_on.
+        If wake-word detection is not configured, requesting wake_word falls back to always_on.
 
         Returns {"mode": effective_mode, "porcupine_available": bool}.
         """

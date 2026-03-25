@@ -177,6 +177,19 @@ class TestDelayEstimation:
         estimated = estimate_delay(mic, ref, max_delay=512)
         assert abs(estimated) <= 2, f"Expected ~0 delay, got {estimated}"
 
+    def test_echo_canceller_retries_delay_estimation_after_silent_window(self):
+        from lazy_claude.aec import EchoCanceller
+
+        ec = EchoCanceller(chunk_size=CHUNK)
+        silent = np.zeros(CHUNK, dtype=np.float32)
+
+        for _ in range(ec._delay_est_frames_needed):
+            ec.cancel(silent, silent)
+
+        assert ec._delay_estimated is False
+        assert ec._delay_est_mic_chunks == []
+        assert ec._delay_est_ref_chunks == []
+
 
 # ---------------------------------------------------------------------------
 # ReferenceBuffer — lock-free SPSC ring buffer

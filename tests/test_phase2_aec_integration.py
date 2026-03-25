@@ -17,6 +17,7 @@ from __future__ import annotations
 import sys
 import time
 import threading
+import importlib.util
 from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
@@ -27,7 +28,7 @@ import pytest
 # ---------------------------------------------------------------------------
 for _missing in ('sounddevice', 'kokoro', 'mcp', 'mcp.server',
                  'mcp.server.fastmcp', 'mcp.server.stdio', 'anyio'):
-    if _missing not in sys.modules:
+    if _missing not in sys.modules and importlib.util.find_spec(_missing) is None:
         sys.modules[_missing] = MagicMock()
 
 SAMPLE_RATE = 16_000
@@ -320,8 +321,9 @@ class TestFallbackGate:
 
         # Gate should have suppressed the chunk — VAD not called, queue empty
         vad.assert_not_called()
-        assert listener._speech_queue.empty(), \
+        assert listener._pending is None, (
             "Fallback gate should have suppressed high-energy AEC residual during TTS"
+        )
 
     def test_fallback_gate_allows_low_energy_clean_chunk(self):
         """During TTS, a low-energy residual should pass through to VAD."""

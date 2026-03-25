@@ -31,6 +31,8 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
+from lazy_claude.wakeword import create_wakeword_detector
+
 # Suppress verbose ML framework logs
 os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')
 os.environ.setdefault('TRANSFORMERS_VERBOSITY', 'error')
@@ -566,7 +568,7 @@ class MacOSContinuousListener:
 
     NORMAL_THRESHOLD: float = 0.5
     BARGE_IN_FRAMES: int = 3
-    SILENCE_DURATION: float = 1.5
+    SILENCE_DURATION: float = 1.0
     MIN_SPEECH_DURATION: float = 0.5
 
     def __init__(self, vad_model: Any, backend: "AVAudioBackend") -> None:
@@ -588,25 +590,22 @@ class MacOSContinuousListener:
         # Use the shared backend and install tap
         self._backend = backend
 
-        # --- Porcupine wake-word engine (Phase 3) ---
+        # --- Wake-word engine ---
         self._porcupine: Optional[Any] = None
-        key = os.environ.get("PORCUPINE_ACCESS_KEY")
-        path = os.environ.get("PORCUPINE_MODEL_PATH")
-        if key and path:
-            try:
-                import pvporcupine  # type: ignore[import-untyped]
-                self._porcupine = pvporcupine.create(access_key=key, keyword_paths=[path])
-                _log("Porcupine wake-word engine initialised.")
-            except Exception as e:
-                _log(f"Porcupine init failed: {e}")
-                self._porcupine = None
+        try:
+            self._porcupine = create_wakeword_detector()
+            if self._porcupine is not None:
+                _log("openWakeWord wake-word engine initialised.")
+        except Exception as e:
+            _log(f"openWakeWord init failed: {e}")
+            self._porcupine = None
 
         # Mode state machine: "wake_word" (waiting for keyword) or "active" (VAD listening)
         self._mode: str = "wake_word" if self._porcupine is not None else "active"
         self._active_since: Optional[float] = None
 
         # Wake-word-only mode: after one utterance, return to wake_word mode.
-        # Default True when Porcupine is available and LAZY_CLAUDE_ALWAYS_ON != "1".
+        # Default True when a wake-word detector is available and LAZY_CLAUDE_ALWAYS_ON != "1".
         if self._porcupine is not None and os.environ.get("LAZY_CLAUDE_ALWAYS_ON") != "1":
             self._wake_word_only_mode: bool = True
         else:
@@ -658,7 +657,7 @@ class MacOSContinuousListener:
             self._active.clear()
             self._reset_utterance_state()
             self.drain_queue()
-            # On deactivation, return to wake_word mode if Porcupine is available
+            # On deactivation, return to wake_word mode if wake-word detection is available
             if getattr(self, '_porcupine', None) is not None:
                 self._mode = "wake_word"
             _log("MacOSContinuousListener: voice mode OFF.")
@@ -750,7 +749,7 @@ class MacOSContinuousListener:
         chunk_duration = _VAD_CHUNK / _VAD_RATE  # ~0.032 s
         now = time.monotonic()
 
-        # --- Wake word mode: run Porcupine, not VAD ---
+        # --- Wake word mode: run the detector, not VAD ---
         _porcupine = getattr(self, '_porcupine', None)
         _mode = getattr(self, '_mode', 'active')
         if _porcupine is not None and _mode == "wake_word":
