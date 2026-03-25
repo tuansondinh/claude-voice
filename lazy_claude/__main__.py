@@ -1,13 +1,19 @@
-"""__main__.py — Entry point for `python -m lazy_claude` and the CLI script."""
+"""__main__.py — Entry point for `python -m lazy_claude` and the CLI script.
+
+stdout_guard must be imported first (before any other lazy_claude module)
+so that fd 1 is safely duplicated before any native library can write to it.
+"""
 
 from __future__ import annotations
+
+# Import stdout_guard first — this redirects fd 1 away from native libs.
+import lazy_claude.stdout_guard  # noqa: F401  (side-effect import)
 
 
 def main() -> None:
     """Start the Lazy Claude MCP server."""
-    # Full implementation in Phase 5 — server.py will be wired up here.
-    import sys
-    print("lazy-claude: MCP server not yet implemented.", file=sys.stderr)
+    from lazy_claude.server import run_server
+    run_server()
 
 
 if __name__ == "__main__":
