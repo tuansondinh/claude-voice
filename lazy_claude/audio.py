@@ -21,7 +21,6 @@ VadStateMachine
 from __future__ import annotations
 
 import os
-import queue
 import sys
 import threading
 import time
@@ -489,7 +488,8 @@ class ContinuousListener:
         self._vad = vad_model
         self._ref_buf = ref_buf
         self._echo_canceller = echo_canceller
-        self._speech_queue: queue.Queue[np.ndarray] = queue.Queue()
+        self._slot_lock = threading.Condition()
+        self._pending: "np.ndarray | None" = None
         self._barge_in_event = threading.Event()
         self._stop_event = threading.Event()
         # Lightweight flag: True while TTS is playing (used for fallback gate only)
@@ -604,19 +604,23 @@ class ContinuousListener:
         """Block until the next user utterance arrives, or *timeout* seconds.
 
         Returns a 16 kHz mono float32 array, or None on timeout.
+        Uses a single-slot Condition to ensure no lost wakeups and no race
+        between replacement and consumption.
         """
-        try:
-            return self._speech_queue.get(timeout=timeout)
-        except queue.Empty:
-            return None
+        with self._slot_lock:
+            notified = self._slot_lock.wait_for(
+                lambda: self._pending is not None, timeout=timeout
+            )
+            if not notified or self._pending is None:
+                return None
+            audio = self._pending
+            self._pending = None
+            return audio
 
     def drain_queue(self) -> None:
-        """Discard all pending speech (e.g. TTS echo that slipped through)."""
-        while not self._speech_queue.empty():
-            try:
-                self._speech_queue.get_nowait()
-            except queue.Empty:
-                break
+        """Discard the pending speech slot (e.g. TTS echo that slipped through)."""
+        with self._slot_lock:
+            self._pending = None
 
     def stop(self) -> None:
         """Stop the background listener thread."""
@@ -746,9 +750,11 @@ class ContinuousListener:
                         now - self._silence_started >= self.SILENCE_DURATION
                         and self._accumulated_speech >= self.MIN_SPEECH_DURATION
                     ):
-                        # Utterance complete — enqueue it
+                        # Utterance complete — store in single-slot and notify
                         audio = np.concatenate(self._utterance_chunks)
-                        self._speech_queue.put(audio.astype(np.float32))
+                        with self._slot_lock:
+                            self._pending = audio.astype(np.float32)
+                            self._slot_lock.notify_all()
                         _log(
                             f"ContinuousListener: queued "
                             f"{len(audio) / SAMPLE_RATE:.2f}s utterance."

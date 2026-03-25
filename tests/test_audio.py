@@ -9,6 +9,8 @@ These tests do NOT require a microphone.  They test:
 
 from __future__ import annotations
 
+import threading
+import time
 import numpy as np
 import pytest
 
@@ -174,3 +176,151 @@ class TestVADModelLoading:
         prob2 = model(chunk)
         # After reset, same silent chunk should give same result
         assert abs(prob1 - prob2) < 1e-5, f"Probabilities differ after reset: {prob1} vs {prob2}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Single-slot Condition-based listener tests (ContinuousListener)
+# ---------------------------------------------------------------------------
+
+
+class TestContinuousListenerSingleSlot:
+    """Phase 2: verify Condition-based single-slot design for ContinuousListener."""
+
+    def _make_listener(self):
+        """Return a ContinuousListener with mocked dependencies (no audio hardware)."""
+        from unittest.mock import MagicMock
+        from lazy_claude.audio import ContinuousListener
+
+        mock_vad = MagicMock()
+        mock_vad.return_value = 0.0
+
+        listener = ContinuousListener.__new__(ContinuousListener)
+        listener._vad = mock_vad
+        listener._ref_buf = None
+        listener._echo_canceller = None
+        listener._slot_lock = threading.Condition()
+        listener._pending = None
+        listener._barge_in_event = threading.Event()
+        listener._stop_event = threading.Event()
+        listener._tts_active = False
+        listener._tts_stopped_at = 0.0
+        listener._active = threading.Event()
+        listener._active.set()
+        listener._recording = False
+        listener._utterance_chunks = []
+        listener._accumulated_speech = 0.0
+        listener._silence_started = None
+        listener._barge_in_frame_count = 0
+        listener._device_changed = False
+        listener._callback = None
+        return listener, mock_vad
+
+    def _build_callback(self, listener):
+        """Build and attach the sounddevice callback without starting audio."""
+        listener._callback = listener._make_callback(16_000, False)
+        return listener._callback
+
+    def _drive_speech(self, listener, callback, n_speech=20):
+        """Feed speech then expire silence timer to produce an utterance."""
+        from unittest.mock import MagicMock
+        listener._vad.return_value = 0.9
+        chunk = np.ones(512, dtype=np.float32) * 0.1
+        indata = chunk.reshape(-1, 1)
+        for _ in range(n_speech):
+            callback(indata, 512, MagicMock(), None)
+        # Expire silence timer
+        listener._silence_started = time.monotonic() - 2.0
+        listener._vad.return_value = 0.0
+        callback(indata, 512, MagicMock(), None)
+
+    def test_slot_lock_is_condition(self):
+        listener, _ = self._make_listener()
+        assert isinstance(listener._slot_lock, threading.Condition)
+
+    def test_pending_starts_none(self):
+        listener, _ = self._make_listener()
+        with listener._slot_lock:
+            assert listener._pending is None
+
+    def test_utterance_stored_in_pending_slot(self):
+        listener, _ = self._make_listener()
+        callback = self._build_callback(listener)
+        self._drive_speech(listener, callback)
+        with listener._slot_lock:
+            assert listener._pending is not None
+            assert isinstance(listener._pending, np.ndarray)
+
+    def test_second_utterance_replaces_first(self):
+        """Second produced utterance replaces first in slot before consumer reads."""
+        listener, _ = self._make_listener()
+        callback = self._build_callback(listener)
+        self._drive_speech(listener, callback)
+        with listener._slot_lock:
+            first = listener._pending
+        assert first is not None
+
+        # Reset recording state
+        listener._recording = False
+        listener._accumulated_speech = 0.0
+        listener._silence_started = None
+
+        self._drive_speech(listener, callback)
+        with listener._slot_lock:
+            second = listener._pending
+
+        assert second is not None
+        assert second is not first
+
+    def test_drain_queue_clears_pending_slot(self):
+        listener, _ = self._make_listener()
+        with listener._slot_lock:
+            listener._pending = np.zeros(512, dtype=np.float32)
+        listener.drain_queue()
+        with listener._slot_lock:
+            assert listener._pending is None
+
+    def test_get_next_speech_returns_none_on_timeout(self):
+        listener, _ = self._make_listener()
+        result = listener.get_next_speech(timeout=0.05)
+        assert result is None
+
+    def test_get_next_speech_returns_utterance(self):
+        listener, _ = self._make_listener()
+        audio = np.ones(1024, dtype=np.float32)
+        with listener._slot_lock:
+            listener._pending = audio
+            listener._slot_lock.notify_all()
+        result = listener.get_next_speech(timeout=1.0)
+        assert result is not None
+        assert isinstance(result, np.ndarray)
+
+    def test_get_next_speech_clears_pending_after_read(self):
+        listener, _ = self._make_listener()
+        audio = np.ones(1024, dtype=np.float32)
+        with listener._slot_lock:
+            listener._pending = audio
+            listener._slot_lock.notify_all()
+        listener.get_next_speech(timeout=1.0)
+        with listener._slot_lock:
+            assert listener._pending is None
+
+    def test_producer_notifies_consumer(self):
+        """Background consumer thread wakes when utterance is placed in slot."""
+        listener, _ = self._make_listener()
+        result_holder = [None]
+
+        def consumer():
+            result_holder[0] = listener.get_next_speech(timeout=2.0)
+
+        t = threading.Thread(target=consumer, daemon=True)
+        t.start()
+        time.sleep(0.05)
+
+        audio = np.ones(512, dtype=np.float32)
+        with listener._slot_lock:
+            listener._pending = audio
+            listener._slot_lock.notify_all()
+
+        t.join(timeout=2.0)
+        assert result_holder[0] is not None
+        assert isinstance(result_holder[0], np.ndarray)

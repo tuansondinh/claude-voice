@@ -571,7 +571,8 @@ class MacOSContinuousListener:
 
     def __init__(self, vad_model: Any, backend: "AVAudioBackend") -> None:
         self._vad = vad_model
-        self._speech_queue: queue.Queue[np.ndarray] = queue.Queue()
+        self._slot_lock = threading.Condition()
+        self._pending: Optional[np.ndarray] = None
         self._barge_in_event = threading.Event()
         self._stop_event = threading.Event()
         self._tts_active: bool = False
@@ -655,19 +656,23 @@ class MacOSContinuousListener:
         """Block until the next user utterance arrives, or *timeout* seconds.
 
         Returns a 16kHz mono float32 array, or None on timeout.
+        Uses a single-slot Condition to ensure no lost wakeups and no race
+        between replacement and consumption.
         """
-        try:
-            return self._speech_queue.get(timeout=timeout)
-        except queue.Empty:
-            return None
+        with self._slot_lock:
+            notified = self._slot_lock.wait_for(
+                lambda: self._pending is not None, timeout=timeout
+            )
+            if not notified or self._pending is None:
+                return None
+            audio = self._pending
+            self._pending = None
+            return audio
 
     def drain_queue(self) -> None:
-        """Discard all pending speech."""
-        while not self._speech_queue.empty():
-            try:
-                self._speech_queue.get_nowait()
-            except queue.Empty:
-                break
+        """Discard the pending speech slot."""
+        with self._slot_lock:
+            self._pending = None
 
     def stop(self) -> None:
         """Stop the backend and release resources."""
@@ -742,7 +747,9 @@ class MacOSContinuousListener:
                     and self._accumulated_speech >= self.MIN_SPEECH_DURATION
                 ):
                     audio = np.concatenate(self._utterance_chunks)
-                    self._speech_queue.put(audio.astype(np.float32))
+                    with self._slot_lock:
+                        self._pending = audio.astype(np.float32)
+                        self._slot_lock.notify_all()
                     _log(
                         f"MacOSContinuousListener: queued "
                         f"{len(audio) / _VAD_RATE:.2f}s utterance."

@@ -320,22 +320,35 @@ class VoiceServer:
             _log("Listening disabled — skipping mic recording.")
             return f"Q: {question}\nA: (skipped — listening paused)"
 
-        # Wait for the user's spoken response from the always-on listener
-        _log("Waiting for user speech…")
-        try:
-            audio = self._listener.get_next_speech(timeout=60.0)
-        except Exception as exc:
-            _log(f"ERROR: mic/listener error: {exc}")
-            return f"Q: {question}\nA: (error — mic failed: {exc})"
+        # STT loop: skip utterances that are likely noise (high no_speech_prob)
+        while True:
+            # Wait for the user's spoken response from the always-on listener
+            _log("Waiting for user speech…")
+            try:
+                audio = self._listener.get_next_speech(timeout=60.0)
+            except Exception as exc:
+                _log(f"ERROR: mic/listener error: {exc}")
+                return f"Q: {question}\nA: (error — mic failed: {exc})"
 
-        if audio is None:
-            _log("No speech detected — timed out.")
-            return f"Q: {question}\nA: (no response — timed out)"
+            if audio is None:
+                _log("No speech detected — timed out.")
+                return f"Q: {question}\nA: (no response — timed out)"
 
-        _log("Transcribing…")
-        result = transcribe(audio, model=self._whisper_model)
-        _log(f"no_speech_prob={result.no_speech_prob:.3f}")
-        return f"Q: {question}\nA: {result.text}"
+            # Drain utterances that arrived while STT is running
+            self._listener.drain_queue()
+
+            _log("Transcribing…")
+            result = transcribe(audio, model=self._whisper_model)
+            _log(f"no_speech_prob={result.no_speech_prob:.3f}")
+
+            if result.no_speech_prob > 0.6:
+                _log(
+                    f"discarded — likely noise "
+                    f"(no_speech_prob={result.no_speech_prob:.3f})"
+                )
+                continue
+
+            return f"Q: {question}\nA: {result.text}"
 
     def _speak_safe(self, text: str) -> None:
         """Run TTS, catching all exceptions so the thread never crashes."""

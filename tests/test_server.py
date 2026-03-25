@@ -335,6 +335,85 @@ class TestConcurrentCallProtection:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Phase 2: Whisper noise filter (no_speech_prob threshold)
+# ---------------------------------------------------------------------------
+
+
+class TestNoSpeechProbFilter:
+    """Phase 2: utterances with high no_speech_prob are discarded and looped."""
+
+    def _dummy_audio(self):
+        return np.zeros(16_000, dtype=np.float32)
+
+    def _make_server_with_two_results(self, first_no_speech_prob, second_text):
+        """Build server whose listener returns the same audio twice, with two transcribe results."""
+        from lazy_claude.stt import TranscribeResult
+        audio = self._dummy_audio()
+
+        server, mock_tts, mock_listener = _make_server(next_speech=audio)
+
+        call_count = [0]
+        results = [
+            TranscribeResult(text="noise", no_speech_prob=first_no_speech_prob),
+            TranscribeResult(text=second_text, no_speech_prob=0.1),
+        ]
+
+        def mock_transcribe(a, model=None):
+            idx = min(call_count[0], len(results) - 1)
+            call_count[0] += 1
+            return results[idx]
+
+        return server, mock_listener, mock_transcribe
+
+    def test_high_no_speech_prob_is_discarded_and_loops(self):
+        """no_speech_prob > 0.6 → discard, call get_next_speech again, eventually return real text."""
+        server, mock_listener, mock_transcribe = self._make_server_with_two_results(
+            first_no_speech_prob=0.8, second_text="hello world"
+        )
+        with patch('lazy_claude.server.transcribe', side_effect=mock_transcribe):
+            result = server.ask_user_voice_impl(questions=["Test?"])
+
+        # Should have called get_next_speech twice (once for noise, once for real speech)
+        assert mock_listener.get_next_speech.call_count >= 2
+        # Final result must contain the real transcription
+        assert "hello world" in result
+
+    def test_low_no_speech_prob_is_forwarded(self):
+        """no_speech_prob <= 0.6 → accepted immediately."""
+        audio = self._dummy_audio()
+        server, mock_tts, mock_listener = _make_server(next_speech=audio)
+        with patch('lazy_claude.server.transcribe',
+                   return_value=_make_transcribe_result("all good", no_speech_prob=0.2)):
+            result = server.ask_user_voice_impl(questions=["Test?"])
+
+        # Only called once — not discarded
+        mock_listener.get_next_speech.assert_called_once()
+        assert "all good" in result
+
+    def test_drain_queue_called_after_get_next_speech(self):
+        """drain_queue() is called after each successful get_next_speech() to flush stale audio."""
+        audio = self._dummy_audio()
+        server, mock_tts, mock_listener = _make_server(next_speech=audio)
+        with patch('lazy_claude.server.transcribe',
+                   return_value=_make_transcribe_result("ok", no_speech_prob=0.1)):
+            server.ask_user_voice_impl(questions=["Test?"])
+
+        # drain_queue must have been called at least once during the Q&A session
+        mock_listener.drain_queue.assert_called()
+
+    def test_boundary_no_speech_prob_06_is_accepted(self):
+        """Exactly 0.6 no_speech_prob → accepted (threshold is strictly > 0.6)."""
+        audio = self._dummy_audio()
+        server, mock_tts, mock_listener = _make_server(next_speech=audio)
+        with patch('lazy_claude.server.transcribe',
+                   return_value=_make_transcribe_result("boundary", no_speech_prob=0.6)):
+            result = server.ask_user_voice_impl(questions=["Test?"])
+
+        mock_listener.get_next_speech.assert_called_once()
+        assert "boundary" in result
+
+
 class TestMCPToolRegistration:
     def test_create_server_returns_fastmcp_app(self):
         mock_tts = _make_mock_tts()
