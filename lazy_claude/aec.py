@@ -509,6 +509,8 @@ class EchoCanceller:
     3. Applies the PBFDLMS filter to estimate and subtract the echo.
     4. Optionally updates the filter weights (frozen during double-talk or
        when reference is silent).
+    5. Optionally applies Residual Echo Suppression (RES) via spectral
+       subtraction to catch echo that slips through the adaptive filter.
 
     Parameters
     ----------
@@ -520,6 +522,15 @@ class EchoCanceller:
         Geigel DTD threshold. Typical range 0.3–0.7.
     chunk_size:
         Processing block size (must match the mic capture chunk size).
+    enable_res:
+        Enable Residual Echo Suppression (spectral subtraction post-filter).
+        Disabled by default for backward compatibility.
+    res_alpha:
+        Smoothing factor for RES reference spectrum estimation (0–1).
+        Higher = slower adaptation, lower = more responsive.
+    res_over_subtraction:
+        Over-subtraction factor for spectral subtraction (>= 1.0).
+        Higher = more aggressive suppression, may cause musical noise.
     """
 
     def __init__(
@@ -528,6 +539,9 @@ class EchoCanceller:
         mu: float = 0.01,
         dtd_threshold: float = 0.5,
         chunk_size: int = CHUNK_SAMPLES,
+        enable_res: bool = False,
+        res_alpha: float = 0.9,
+        res_over_subtraction: float = 1.5,
     ) -> None:
         self.filter_length = filter_length
         self.mu = mu
@@ -553,6 +567,22 @@ class EchoCanceller:
         self._first_mic: Optional[np.ndarray] = None
         self._first_ref: Optional[np.ndarray] = None
 
+        # Residual Echo Suppression (RES) — spectral subtraction
+        self._res_enabled: bool = enable_res
+        self._res_alpha: float = res_alpha
+        self._res_over_subtraction: float = res_over_subtraction
+        # FFT size for RES (overlap-add on chunk_size frames)
+        self._res_fft_size: int = 1
+        while self._res_fft_size < chunk_size * 2:
+            self._res_fft_size <<= 1
+        n_freq = self._res_fft_size // 2 + 1
+        # Smoothed reference power spectrum (initialised small to avoid over-suppression)
+        self._res_ref_spectrum: np.ndarray = np.ones(n_freq, dtype=np.float64) * 1e-8
+        # Overlap-add tail buffer (length = fft_size - chunk_size)
+        self._res_ola_tail: np.ndarray = np.zeros(
+            self._res_fft_size - chunk_size, dtype=np.float32
+        )
+
     def cancel(self, mic_chunk: np.ndarray, ref_chunk: np.ndarray) -> np.ndarray:
         """Cancel echo from mic_chunk given the reference ref_chunk.
 
@@ -567,6 +597,8 @@ class EchoCanceller:
         -------
         np.ndarray
             Cleaned signal with echo subtracted (float32, length chunk_size).
+            When enable_res=True, an additional spectral subtraction pass is
+            applied to suppress residual echo that the adaptive filter missed.
         """
         mic_chunk = np.asarray(mic_chunk, dtype=np.float32)
         ref_chunk = np.asarray(ref_chunk, dtype=np.float32)
@@ -631,7 +663,95 @@ class EchoCanceller:
         if not double_talk and not ref_is_silent:
             self._filter.update(error, X_k)
 
+        # --- Residual Echo Suppression (RES) — spectral subtraction ---
+        if self._res_enabled:
+            error = self._apply_res(error, delayed_ref, ref_is_silent)
+
         return error
+
+    def _apply_res(
+        self,
+        error: np.ndarray,
+        ref: np.ndarray,
+        ref_is_silent: bool,
+    ) -> np.ndarray:
+        """Apply spectral subtraction (RES) to suppress residual echo.
+
+        Uses the reference signal's power spectrum as a mask to subtract
+        estimated residual echo components from the PBFDLMS error signal.
+
+        The algorithm:
+        1. Estimate the reference PSD (smoothed over time).
+        2. Compute the FFT of the error signal.
+        3. Subtract alpha * reference PSD from the error PSD (floored at beta).
+        4. Reconstruct via IFFT using the original phase.
+
+        This catches echo that the adaptive filter missed — especially at
+        frequencies where the filter has not fully converged.
+
+        Parameters
+        ----------
+        error:
+            Post-adaptive-filter residual (float32, chunk_size).
+        ref:
+            Delayed reference signal for this frame (float32, chunk_size).
+        ref_is_silent:
+            When True, skip RES (reference PSD update only).
+
+        Returns
+        -------
+        np.ndarray
+            RES-processed signal (float32, chunk_size).
+        """
+        B = self.chunk_size
+        N = self._res_fft_size
+        alpha = self._res_alpha
+        beta = 0.001  # spectral floor — retain at least this fraction of signal
+
+        # Update smoothed reference power spectrum
+        ref_d = ref.astype(np.float64)
+        R = np.fft.rfft(ref_d, n=N)
+        ref_psd = np.abs(R) ** 2
+        self._res_ref_spectrum = (
+            alpha * self._res_ref_spectrum + (1.0 - alpha) * ref_psd
+        )
+
+        if ref_is_silent:
+            # No echo to suppress — passthrough
+            return error
+
+        # Spectral subtraction on the error signal
+        err_d = error.astype(np.float64)
+        E = np.fft.rfft(err_d, n=N)
+        err_psd = np.abs(E) ** 2
+
+        # Compute gain: G^2 = max(|E|^2 - alpha_sub * |R_smooth|^2, beta * |E|^2) / |E|^2
+        # Simplified: subtract scaled reference spectrum, floor at beta
+        sub = self._res_over_subtraction * self._res_ref_spectrum
+        err_psd_floored = np.maximum(err_psd - sub, beta * err_psd)
+
+        # Apply gain while preserving original phase
+        with np.errstate(divide='ignore', invalid='ignore'):
+            gain = np.where(
+                err_psd > 1e-16,
+                np.sqrt(err_psd_floored / (err_psd + 1e-16)),
+                1.0,
+            )
+
+        E_suppressed = E * gain
+
+        # IFFT — overlap-add to reconstruct chunk_size output
+        y_full = np.fft.irfft(E_suppressed, n=N)
+        # Overlap-add: combine current frame with saved tail
+        y_out = y_full[:B] + self._res_ola_tail[:B]
+        # Save overlap tail for next frame
+        tail_len = len(self._res_ola_tail)
+        if N - B <= tail_len:
+            self._res_ola_tail[:N - B] = y_full[B:]
+        else:
+            self._res_ola_tail[:N - B] = y_full[B:]
+
+        return y_out.astype(np.float32)
 
     def filter_norm(self) -> float:
         """Return the L2 norm of the current filter coefficients.
@@ -641,8 +761,32 @@ class EchoCanceller:
         return self._filter.filter_norm()
 
     def reset(self) -> None:
-        """Reset the filter state (but keep the coefficients)."""
+        """Reset the filter state (but keep the coefficients).
+
+        Use this to restart delay estimation (e.g. after a brief audio dropout)
+        while preserving the learned filter coefficients for fast re-convergence.
+        """
         self._delay_estimated = False
         self._first_mic = None
         self._first_ref = None
         self._delay_buf[:] = 0.0
+
+    def reset_full(self) -> None:
+        """Full reset: zero filter coefficients AND clear all state.
+
+        Use this after a device change or significant audio path change where
+        the previously learned coefficients are no longer valid.
+        """
+        # Zero filter coefficients
+        self._filter.W[:] = 0.0
+        # Reset delay estimation state
+        self.reset()
+        # Reset RES state
+        self._res_ref_spectrum[:] = 1e-8
+        self._res_ola_tail[:] = 0.0
+        # Reset internal PBFDLMS history
+        self._filter._X_hist[:] = 0.0
+        self._filter._ref_buf[:] = 0.0
+        self._filter._bin_power[:] = 0.01
+        self._filter._input_power = 0.01
+        _log("EchoCanceller: full reset (coefficients zeroed).")

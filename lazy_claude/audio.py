@@ -499,6 +499,10 @@ class ContinuousListener:
         self._silence_started: float | None = None
         self._barge_in_frame_count: int = 0
 
+        # Device change flag: set by _handle_device_change(), cleared by _run()
+        # after it restarts the audio stream.
+        self._device_changed: bool = False
+
         # Callback reference — set by _run() once the capture rate is known.
         # Exposed so tests can invoke the callback directly without starting audio.
         self._callback: "Optional[Any]" = None
@@ -571,6 +575,34 @@ class ContinuousListener:
         """Stop the background listener thread."""
         self._stop_event.set()
         _log("ContinuousListener stop requested.")
+
+    def _handle_device_change(self) -> None:
+        """Handle an audio device change.
+
+        When PortAudio reports a device change (e.g. user unplugged headphones),
+        this method:
+        1. Resets the echo canceller's filter coefficients via reset_full()
+           because the acoustic path has changed and learned coefficients are stale.
+        2. Resets the EchoCanceller's delay estimation so it re-calibrates
+           on the next few frames.
+        3. Sets the _device_changed flag so _run() can restart the stream.
+
+        This is called either from the mic callback (when a status flag indicates
+        a device problem) or externally when a device change event is detected.
+        """
+        _log("ContinuousListener: audio device change detected — resetting AEC.")
+
+        if self._echo_canceller is not None:
+            # reset_full() zeros coefficients + clears delay state
+            if hasattr(self._echo_canceller, 'reset_full'):
+                self._echo_canceller.reset_full()
+            else:
+                # Fallback for compatibility: at least reset delay estimation
+                if hasattr(self._echo_canceller, '_delay_estimated'):
+                    self._echo_canceller._delay_estimated = False
+
+        # Set flag so _run() can restart the PortAudio stream
+        self._device_changed = True
 
     # ------------------------------------------------------------------
     # Background thread
@@ -678,31 +710,48 @@ class ContinuousListener:
     def _run(self) -> None:
         import sounddevice as sd  # noqa: PLC0415
 
-        try:
-            capture_rate, needs_resample = _get_capture_rate()
-        except Exception as exc:
-            _log(f"ERROR: ContinuousListener could not query audio device: {exc}")
-            return
+        while not self._stop_event.is_set():
+            try:
+                capture_rate, needs_resample = _get_capture_rate()
+            except Exception as exc:
+                _log(f"ERROR: ContinuousListener could not query audio device: {exc}")
+                return
 
-        native_chunk = CHUNK_SAMPLES if not needs_resample else int(
-            CHUNK_SAMPLES * capture_rate / SAMPLE_RATE
-        )
+            native_chunk = CHUNK_SAMPLES if not needs_resample else int(
+                CHUNK_SAMPLES * capture_rate / SAMPLE_RATE
+            )
 
-        callback = self._make_callback(capture_rate, needs_resample)
+            callback = self._make_callback(capture_rate, needs_resample)
+            self._device_changed = False
 
-        try:
-            with sd.InputStream(
-                samplerate=capture_rate,
-                channels=1,
-                dtype="float32",
-                blocksize=native_chunk,
-                callback=callback,
-            ):
-                _log("ContinuousListener: mic open.")
-                self._stop_event.wait()
-        except sd.PortAudioError as exc:
-            _log(f"ERROR: ContinuousListener PortAudio: {exc}")
-        except Exception as exc:
-            _log(f"ERROR: ContinuousListener unexpected: {exc}")
-        finally:
-            _log("ContinuousListener: mic closed.")
+            try:
+                with sd.InputStream(
+                    samplerate=capture_rate,
+                    channels=1,
+                    dtype="float32",
+                    blocksize=native_chunk,
+                    callback=callback,
+                ):
+                    _log("ContinuousListener: mic open.")
+                    # Poll for stop or device change
+                    while not self._stop_event.is_set():
+                        if self._device_changed:
+                            _log("ContinuousListener: device change — restarting stream.")
+                            break
+                        self._stop_event.wait(timeout=0.5)
+            except sd.PortAudioError as exc:
+                _log(f"ERROR: ContinuousListener PortAudio: {exc}")
+                # If a device error occurs, treat it as a device change and retry
+                if not self._stop_event.is_set():
+                    _log("ContinuousListener: retrying after PortAudio error…")
+                    self._handle_device_change()
+                    import time as _time
+                    _time.sleep(1.0)  # brief back-off before retry
+                    continue
+            except Exception as exc:
+                _log(f"ERROR: ContinuousListener unexpected: {exc}")
+                return  # Unknown error — give up
+            finally:
+                _log("ContinuousListener: mic closed.")
+
+            # If we get here due to device change, loop continues and restarts

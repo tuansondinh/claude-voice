@@ -142,9 +142,45 @@ Use the ask_user_voice tool to get the user's voice input on whether to proceed 
 ### Core Components
 - **`server.py`** — MCP server setup and tool registration
 - **`stt.py`** — Speech-to-text using Whisper.cpp
-- **`tts.py`** — Text-to-speech using Kokoro
-- **`audio.py`** — Audio recording and playback management
+- **`tts.py`** — Text-to-speech using Kokoro; pushes audio into AEC reference buffer
+- **`audio.py`** — Always-on mic with VAD, barge-in detection, and device change handling
+- **`aec.py`** — Acoustic Echo Cancellation (AEC) pipeline
 - **`stdout_guard.py`** — Prevents audio interference with Claude Code output
+
+### Acoustic Echo Cancellation (AEC)
+
+The server uses a multi-stage AEC pipeline to suppress TTS echo at the microphone:
+
+1. **PBFDLMS adaptive filter** — Partitioned-block frequency-domain LMS filter that
+   learns and cancels the speaker-to-microphone acoustic path in real time.
+2. **Residual Echo Suppression (RES)** — Spectral subtraction post-filter that catches
+   echo components the adaptive filter misses (especially during early convergence).
+3. **Geigel Double-Talk Detector (DTD)** — Freezes filter adaptation when user speech
+   and TTS overlap, preventing filter divergence.
+4. **Fallback gate** — Suppresses chunks with high residual power during TTS playback
+   when AEC has not yet converged (safety net for the first few seconds).
+5. **Device change handling** — When PortAudio reports a device change, filter
+   coefficients are reset and delay estimation re-runs automatically.
+
+The mic stays open throughout TTS playback — no hard muting. Barge-in works by running
+VAD on the AEC-cleaned signal; when the user speaks, VAD fires and TTS stops.
+
+### Manual AEC Test Script
+
+To generate a before/after comparison of the echo cancellation:
+
+```bash
+# Uses a synthetic 440 Hz tone (no WAV needed):
+python scripts/test_aec_manual.py
+
+# Or pass your own WAV file:
+python scripts/test_aec_manual.py /path/to/speech.wav --duration 10
+
+# Output written to ./aec_test_output/
+#   raw_mic.wav        - unprocessed microphone signal
+#   cleaned_aec.wav    - after adaptive filter only
+#   cleaned_res.wav    - after adaptive filter + residual echo suppression
+```
 
 ### Model Downloads
 Models are cached locally:
@@ -206,9 +242,12 @@ lazy-claude/
 │   ├── server.py            # MCP server and tool definitions
 │   ├── stt.py               # Speech-to-text implementation
 │   ├── tts.py               # Text-to-speech implementation
-│   ├── audio.py             # Audio device management
+│   ├── audio.py             # Always-on mic, VAD, barge-in, device change
+│   ├── aec.py               # Acoustic Echo Cancellation (PBFDLMS + RES + DTD)
 │   ├── stdout_guard.py      # Output safety wrapper
 │   └── models/              # Model files and utilities
+├── scripts/
+│   └── test_aec_manual.py   # Manual AEC before/after comparison tool
 ├── tests/                   # Test suite
 ├── pyproject.toml           # Project metadata and dependencies
 └── README.md                # This file
