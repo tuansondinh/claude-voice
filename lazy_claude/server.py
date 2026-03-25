@@ -167,8 +167,11 @@ class VoiceServer:
 # FastMCP app factory
 # ---------------------------------------------------------------------------
 
-def create_server() -> "mcp.server.fastmcp.FastMCP":  # type: ignore[name-defined]
-    """Build and return the FastMCP app with all voice tools registered."""
+def create_server() -> "tuple[mcp.server.fastmcp.FastMCP, VoiceServer]":  # type: ignore[name-defined]
+    """Build and return the FastMCP app with all voice tools registered.
+
+    Returns a (app, voice) tuple so callers can call voice.shutdown() on exit.
+    """
     from mcp.server.fastmcp import FastMCP
 
     voice = VoiceServer()
@@ -208,7 +211,7 @@ def create_server() -> "mcp.server.fastmcp.FastMCP":  # type: ignore[name-define
         """
         return voice.toggle_listening_impl(enabled=enabled)
 
-    return app
+    return app, voice
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +223,7 @@ def run_server() -> None:
     import anyio
     from mcp.server.stdio import stdio_server
 
-    app = create_server()
+    app, voice = create_server()
 
     # Build a text-mode wrapper around the *real* stdout fd (not the
     # redirected one — stdout_guard already redirected fd 1 to stderr).
@@ -244,4 +247,5 @@ def run_server() -> None:
     except KeyboardInterrupt:
         _log("Server interrupted.")
     finally:
+        voice.shutdown()
         _log("Server stopped.")

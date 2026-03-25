@@ -376,7 +376,7 @@ class TestMCPToolRegistration:
              patch('lazy_claude.server.load_vad_model', return_value=MagicMock()):
             from lazy_claude.server import create_server
             from mcp.server.fastmcp import FastMCP
-            app = create_server()
+            app, voice = create_server()
         assert isinstance(app, FastMCP)
 
     def test_ask_user_voice_tool_registered(self):
@@ -384,7 +384,7 @@ class TestMCPToolRegistration:
              patch('lazy_claude.server.load_model', return_value=MagicMock()), \
              patch('lazy_claude.server.load_vad_model', return_value=MagicMock()):
             from lazy_claude.server import create_server
-            app = create_server()
+            app, voice = create_server()
         tool_names = [t.name for t in asyncio.run(app.list_tools())]
         assert "ask_user_voice" in tool_names
 
@@ -393,7 +393,7 @@ class TestMCPToolRegistration:
              patch('lazy_claude.server.load_model', return_value=MagicMock()), \
              patch('lazy_claude.server.load_vad_model', return_value=MagicMock()):
             from lazy_claude.server import create_server
-            app = create_server()
+            app, voice = create_server()
         tool_names = [t.name for t in asyncio.run(app.list_tools())]
         assert "speak_message" in tool_names
 
@@ -402,6 +402,6 @@ class TestMCPToolRegistration:
              patch('lazy_claude.server.load_model', return_value=MagicMock()), \
              patch('lazy_claude.server.load_vad_model', return_value=MagicMock()):
             from lazy_claude.server import create_server
-            app = create_server()
+            app, voice = create_server()
         tool_names = [t.name for t in asyncio.run(app.list_tools())]
         assert "toggle_listening" in tool_names

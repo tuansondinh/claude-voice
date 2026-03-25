@@ -112,13 +112,13 @@ Enable or disable the voice input listening mode (useful for background noise or
 **Example**:
 ```python
 result = toggle_listening(enabled=False)
-# Output: {"status": "disabled"}
+# Output: {"listening": False}
 ```
 
 **Parameters**:
 - `enabled` — `True` to enable, `False` to disable
 
-**Returns**: `{"status": "enabled" | "disabled"}`
+**Returns**: `{"listening": <bool>}` — the current listening state after the change
 
 ---
 
