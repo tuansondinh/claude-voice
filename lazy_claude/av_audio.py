@@ -569,7 +569,7 @@ class MacOSContinuousListener:
     NORMAL_THRESHOLD: float = 0.5
     BARGE_IN_FRAMES: int = 3
     SILENCE_DURATION: float = 0.5
-    MIN_SPEECH_DURATION: float = 0.5
+    MIN_SPEECH_DURATION: float = 0.2
 
     def __init__(self, vad_model: Any, backend: "AVAudioBackend") -> None:
         self._vad = vad_model
@@ -617,7 +617,7 @@ class MacOSContinuousListener:
         else:
             self._wake_word_only_mode = False
 
-        self._backend.install_mic_tap(self._process_chunk)
+        self._backend_tap_active: bool = False
 
         _log("MacOSContinuousListener started.")
 
@@ -664,6 +664,9 @@ class MacOSContinuousListener:
     def set_active(self, active: bool) -> None:
         """Enable or disable speech collection (voice mode toggle)."""
         if active:
+            if not getattr(self, "_backend_tap_active", False):
+                self._backend.install_mic_tap(self._process_chunk)
+                self._backend_tap_active = True
             self.drain_queue()
             self._active.set()
             _log("MacOSContinuousListener: voice mode ON.")
@@ -672,6 +675,9 @@ class MacOSContinuousListener:
             self._reset_utterance_state()
             self._reset_barge_in_state()
             self.drain_queue()
+            if getattr(self, "_backend_tap_active", False):
+                self._backend.remove_mic_tap()
+                self._backend_tap_active = False
             # On deactivation, return to wake_word mode if wake-word detection is available
             if getattr(self, '_porcupine', None) is not None:
                 self._mode = "wake_word"
@@ -828,6 +834,7 @@ class MacOSContinuousListener:
                         audio = np.concatenate(self._barge_in_chunks).astype(np.float32)
                         with self._slot_lock:
                             self._barge_in_candidate = audio
+                        self._barge_in_event.set()
                         self._reset_barge_in_state()
                 else:
                     self._barge_in_frame_count = max(0, self._barge_in_frame_count - 1)

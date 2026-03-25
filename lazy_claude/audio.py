@@ -466,7 +466,7 @@ class ContinuousListener:
 
     # Utterance segmentation
     SILENCE_DURATION: float = 0.5       # seconds of trailing silence to stop
-    MIN_SPEECH_DURATION: float = 0.5    # minimum speech before a stop is honoured
+    MIN_SPEECH_DURATION: float = 0.2    # minimum speech before a stop is honoured
 
     # Fallback gate: if AEC residual RMS power exceeds this during TTS → suppress chunk.
     # Acts as a safety net when the adaptive filter has not yet converged.
@@ -502,12 +502,15 @@ class ContinuousListener:
         self._echo_canceller = echo_canceller
         self._slot_lock = threading.Condition()
         self._pending: "np.ndarray | None" = None
+        self._barge_in_candidate: "np.ndarray | None" = None
         self._barge_in_event = threading.Event()
         self._stop_event = threading.Event()
         # Lightweight flag: True while TTS is playing (used for fallback gate only)
         self._tts_active: bool = False
         # Timestamp when TTS stopped — used for post-TTS echo tail
         self._tts_stopped_at: float = 0.0
+        # Timestamp of the most recent detected speech frame.
+        self._last_input_at: float | None = None
         # threading.Event: set = voice mode active (mic collects speech)
         self._active = threading.Event()
 
@@ -517,6 +520,10 @@ class ContinuousListener:
         self._accumulated_speech: float = 0.0
         self._silence_started: float | None = None
         self._barge_in_frame_count: int = 0
+        self._barge_in_recording: bool = False
+        self._barge_in_chunks: list[np.ndarray] = []
+        self._barge_in_accumulated_speech: float = 0.0
+        self._barge_in_silence_started: float | None = None
 
         # Device change flag: set by _handle_device_change(), cleared by _run()
         # after it restarts the audio stream.
@@ -593,6 +600,14 @@ class ContinuousListener:
         except Exception:
             pass
 
+    def _reset_barge_in_state(self) -> None:
+        """Clear any in-progress or buffered TTS interruption utterance."""
+        self._barge_in_frame_count = 0
+        self._barge_in_recording = False
+        self._barge_in_chunks = []
+        self._barge_in_accumulated_speech = 0.0
+        self._barge_in_silence_started = None
+
     def set_active(self, active: bool) -> None:
         """Enable or disable speech collection (voice mode toggle).
 
@@ -607,6 +622,7 @@ class ContinuousListener:
         else:
             self._active.clear()
             self._reset_utterance_state()
+            self._reset_barge_in_state()
             self.drain_queue()
             # On deactivation, return to wake_word mode if wake-word detection is available
             if getattr(self, '_porcupine', None) is not None:
@@ -625,15 +641,30 @@ class ContinuousListener:
         self._tts_active = playing
         if not playing:
             self._tts_stopped_at = time.monotonic()
+            self._reset_barge_in_state()
 
     def clear_barge_in(self) -> None:
         """Reset the barge-in flag before a new TTS turn."""
         self._barge_in_event.clear()
+        self._reset_barge_in_state()
+        with self._slot_lock:
+            self._barge_in_candidate = None
 
     @property
     def barge_in(self) -> threading.Event:
         """Event that is set when barge-in speech is detected during TTS."""
         return self._barge_in_event
+
+    def get_last_input_at(self) -> float | None:
+        """Return the monotonic timestamp of the latest detected speech frame."""
+        return self._last_input_at
+
+    def pop_barge_in_candidate(self) -> "np.ndarray | None":
+        """Return the next buffered interruption utterance, if any."""
+        with self._slot_lock:
+            audio = self._barge_in_candidate
+            self._barge_in_candidate = None
+            return audio
 
     def get_next_speech(self, timeout: float = 60.0) -> "np.ndarray | None":
         """Block until the next user utterance arrives, or *timeout* seconds.
@@ -780,23 +811,37 @@ class ContinuousListener:
             prob = self._vad(processed)
 
             if tts_active:
-                # ── TTS playing: barge-in detection on cleaned signal ──
-                # Use the same NORMAL_THRESHOLD — AEC has already attenuated echo.
                 if prob >= self.NORMAL_THRESHOLD:
-                    self._barge_in_frame_count += 1
-                    if self._barge_in_frame_count >= self.BARGE_IN_FRAMES:
-                        # Confirmed barge-in: raise event and switch to record
-                        self._barge_in_event.set()
-                        self._tts_active = False   # clear TTS flag
-                        self._barge_in_frame_count = 0
-                        # Start capturing the barge-in utterance
-                        self._recording = True
-                        self._accumulated_speech = chunk_duration
-                        self._silence_started = None
-                        self._utterance_chunks = [processed]
+                    self._last_input_at = now
+                    if not self._barge_in_recording:
+                        self._barge_in_frame_count += 1
+                        if self._barge_in_frame_count >= self.BARGE_IN_FRAMES:
+                            self._barge_in_recording = True
+                            self._barge_in_frame_count = 0
+                            self._barge_in_accumulated_speech = chunk_duration
+                            self._barge_in_silence_started = None
+                            self._barge_in_chunks = [processed]
+                    else:
+                        self._barge_in_chunks.append(processed)
+                        self._barge_in_accumulated_speech += chunk_duration
+                        self._barge_in_silence_started = None
                 else:
-                    self._barge_in_frame_count = max(0, self._barge_in_frame_count - 1)
-                return  # discard chunk (still in TTS, barge-in handled above)
+                    if self._barge_in_recording:
+                        self._barge_in_chunks.append(processed)
+                        if self._barge_in_silence_started is None:
+                            self._barge_in_silence_started = now
+                        elif (
+                            now - self._barge_in_silence_started >= self.SILENCE_DURATION
+                            and self._barge_in_accumulated_speech >= self.MIN_SPEECH_DURATION
+                        ):
+                            audio = np.concatenate(self._barge_in_chunks).astype(np.float32)
+                            with self._slot_lock:
+                                self._barge_in_candidate = audio
+                            self._barge_in_event.set()
+                            self._reset_barge_in_state()
+                    else:
+                        self._barge_in_frame_count = max(0, self._barge_in_frame_count - 1)
+                return
 
             # ── Normal listening ──
             self._barge_in_frame_count = 0
@@ -804,6 +849,7 @@ class ContinuousListener:
 
             if not self._recording:
                 if is_speech:
+                    self._last_input_at = now
                     self._recording = True
                     self._accumulated_speech = chunk_duration
                     self._silence_started = None
@@ -823,6 +869,7 @@ class ContinuousListener:
             else:
                 self._utterance_chunks.append(processed)
                 if is_speech:
+                    self._last_input_at = now
                     self._accumulated_speech += chunk_duration
                     self._silence_started = None
                 else:
