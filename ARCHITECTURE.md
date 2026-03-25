@@ -17,7 +17,11 @@ lazy-claude provides voice input/output integration for Claude Code with **two s
 
 Both paths expose the same MCP tool API: `ask_user_voice`, `speak_message`, `toggle_listening`.
 
-### Audio Flow Architecture (Mermaid)
+---
+
+## Component Architecture
+
+### System Overview
 
 ```mermaid
 graph TD
@@ -95,11 +99,9 @@ graph TD
     style API fill:#f3e5f5,stroke:#6a1b9a
 ```
 
----
+### Detailed Data Flow
 
-## Component Architecture
-
-### Data Flow: macOS System AEC Path
+#### macOS System AEC Path
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -144,7 +146,7 @@ graph TD
 - **Tap callback is minimal**: CoreAudio callback only enqueues raw audio into a bounded queue; all Python work (resampling, rechunking, VAD) happens in a consumer thread
 - **Device change recovery**: Engine registers for `AVAudioEngineConfigurationChangeNotification` and restarts on device switch
 
-### Data Flow: Fallback Path (sounddevice + custom AEC)
+#### Fallback Path (sounddevice + custom AEC)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
