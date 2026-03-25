@@ -3,10 +3,23 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "lazy-claude"
+name = "claude-voice"
 version = "0.1.0"
-description = "Voice MCP server for Claude Code"
+description = "Voice MCP server for Claude Code — hands-free voice input/output via TTS + Whisper"
+readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.12"
+keywords = ["mcp", "voice", "tts", "stt", "claude", "whisper", "hands-free"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: MacOS X",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
 dependencies = [
     "kokoro>=0.9,<1",
     "soundfile>=0.12",
@@ -19,6 +32,11 @@ dependencies = [
     "pip",
 ]
 
+[project.urls]
+Homepage = "https://github.com/tuansondinh/claude-voice"
+Repository = "https://github.com/tuansondinh/claude-voice"
+Issues = "https://github.com/tuansondinh/claude-voice/issues"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=9.0.2",
@@ -26,7 +44,7 @@ dev = [
 macos = ["pyobjc-framework-AVFoundation>=10.0"]
 
 [project.scripts]
-lazy-claude = "lazy_claude.__main__:main"
+claude-voice = "lazy_claude.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["lazy_claude"]

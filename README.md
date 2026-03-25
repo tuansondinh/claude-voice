@@ -1,6 +1,34 @@
-# lazy-claude: Voice MCP Server for Claude Code
+# claude-voice: Voice MCP Server for Claude Code
 
 A Model Context Protocol (MCP) server that provides voice input/output integration for Claude Code, enabling hands-free interaction and voice-driven workflows on macOS.
+
+## Quick Install
+
+**Prerequisites** (macOS):
+```bash
+brew install espeak-ng ffmpeg
+```
+
+**Add to Claude Code** (one command):
+```bash
+claude mcp add claude-voice npx @tuan_son.dinh/claude-voice
+```
+
+Or add manually to `~/.claude.json` under `mcpServers`:
+```json
+{
+  "claude-voice": {
+    "command": "npx",
+    "args": ["@tuan_son.dinh/claude-voice"]
+  }
+}
+```
+
+> On first run the server auto-installs its Python dependencies (~500MB). Subsequent starts are instant.
+
+That's it — Claude Code will download and run the server automatically on next start.
+
+---
 
 ## Features
 
@@ -8,7 +36,7 @@ A Model Context Protocol (MCP) server that provides voice input/output integrati
 - **Text-to-Speech**: Convert text responses to spoken audio with natural-sounding output
 - **Real-Time Recording**: Stream audio input with automatic silence detection and submission
 - **Fast Model Loading**: Efficient ML model management for speech recognition and synthesis
-- **Fully Integrated**: Registered as `lazy-claude` MCP server in Claude Code
+- **Fully Integrated**: Registered as `claude-voice` MCP server in Claude Code
 
 ## Prerequisites
 
@@ -34,7 +62,7 @@ Automatically installed via `pyproject.toml`:
 
 ### 1. Clone or Navigate to Project
 ```bash
-cd /Users/sonwork/Workspace/lazy-claude
+cd /Users/sonwork/Workspace/claude-voice
 ```
 
 ### 2. Install System Dependencies
@@ -55,9 +83,9 @@ pip install -e .
 The server is pre-registered in `~/.claude.json`:
 ```json
 {
-  "lazy-claude": {
+  "claude-voice": {
     "command": "uv",
-    "args": ["--directory", "/Users/sonwork/Workspace/lazy-claude", "run", "python", "-m", "lazy_claude"]
+    "args": ["--directory", "/Users/sonwork/Workspace/claude-voice", "run", "python", "-m", "lazy_claude"]
   }
 }
 ```
@@ -67,7 +95,7 @@ If not present, add this entry to the `mcpServers` object in `~/.claude.json`.
 ## Usage
 
 ### Starting the Server
-The server runs automatically when Claude Code loads the `lazy-claude` MCP. No manual startup needed.
+The server runs automatically when Claude Code loads the `claude-voice` MCP. No manual startup needed.
 
 ### Available Tools
 
@@ -125,7 +153,7 @@ result = toggle_listening(enabled=False)
 ## Voice Workflow Integration
 
 ### In Claude Code
-Always use `mcp__lazy-claude__ask_user_voice` for voice input when handling user interaction:
+Always use `mcp__claude-voice__ask_user_voice` for voice input when handling user interaction:
 
 ```markdown
 Use the ask_user_voice tool to get the user's voice input on whether to proceed with deployment.
@@ -236,7 +264,7 @@ uv run python -m lazy_claude
 
 ### Project Structure
 ```
-lazy-claude/
+claude-voice/
 ├── lazy_claude/
 │   ├── __main__.py          # Entry point
 │   ├── server.py            # MCP server and tool definitions
@@ -270,7 +298,7 @@ lazy-claude/
 
 ## License
 
-Part of the lazy-claude project. See LICENSE for details.
+Part of the claude-voice project. See LICENSE for details.
 
 ## Support
 

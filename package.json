@@ -1,0 +1,39 @@
+{
+  "name": "@tuan_son.dinh/claude-voice",
+  "version": "0.1.0",
+  "description": "Voice MCP server for Claude Code — hands-free voice input/output via TTS + Whisper",
+  "main": "bin/claude-voice.js",
+  "bin": {
+    "claude-voice": "bin/claude-voice.js"
+  },
+  "scripts": {},
+  "keywords": [
+    "mcp",
+    "voice",
+    "claude",
+    "tts",
+    "stt",
+    "whisper",
+    "hands-free"
+  ],
+  "author": "tuansondinh",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tuansondinh/claude-voice.git"
+  },
+  "homepage": "https://github.com/tuansondinh/claude-voice",
+  "bugs": {
+    "url": "https://github.com/tuansondinh/claude-voice/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/",
+    "lazy_claude/",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE"
+  ]
+}
