@@ -2,8 +2,9 @@
 
 These tests cover:
 - Public API surface
-- transcribe() with empty / silent audio returns ""
-- transcribe() returns a string for normal audio
+- transcribe() with empty / silent audio returns TranscribeResult(text="", no_speech_prob=1.0)
+- transcribe() returns a TranscribeResult for normal audio
+- TranscribeResult.text is a str; TranscribeResult.no_speech_prob is a float in [0, 1]
 - Artifact stripping (BLANK_AUDIO tokens, leading/trailing whitespace)
 - Model configurability (model name parameter)
 - All output goes to stderr (stdout stays clean)
@@ -59,31 +60,38 @@ class TestSTTModuleAPI:
 
 
 class TestTranscribeSilentAudio:
-    """transcribe() must return empty string for empty or silent input."""
+    """transcribe() must return TranscribeResult with empty text for empty/silent input."""
 
-    def test_empty_array_returns_empty_string(self):
+    def test_empty_array_returns_empty_text(self):
         from lazy_claude.stt import transcribe
         audio = np.array([], dtype=np.float32)
         result = transcribe(audio)
-        assert result == "", f"Expected '', got: {result!r}"
+        assert result.text == "", f"Expected text='', got: {result.text!r}"
 
-    def test_zero_samples_returns_empty_string(self):
+    def test_empty_array_returns_high_no_speech_prob(self):
+        from lazy_claude.stt import transcribe
+        audio = np.array([], dtype=np.float32)
+        result = transcribe(audio)
+        assert result.no_speech_prob == 1.0
+
+    def test_zero_samples_returns_empty_text(self):
         from lazy_claude.stt import transcribe
         audio = np.zeros(0, dtype=np.float32)
         result = transcribe(audio)
-        assert result == ""
+        assert result.text == ""
 
-    def test_silence_returns_string(self):
-        """Pure silence should return a string (possibly empty after artifact stripping)."""
-        from lazy_claude.stt import transcribe
+    def test_silence_returns_transcribe_result(self):
+        """Pure silence should return a TranscribeResult (text possibly empty)."""
+        from lazy_claude.stt import transcribe, TranscribeResult
         audio = _silence(1.0)
         result = transcribe(audio)
-        assert isinstance(result, str)
+        assert isinstance(result, TranscribeResult)
+        assert isinstance(result.text, str)
 
-    def test_transcribe_returns_str_type(self):
-        from lazy_claude.stt import transcribe
+    def test_transcribe_returns_transcribe_result_type(self):
+        from lazy_claude.stt import transcribe, TranscribeResult
         result = transcribe(_silence(0.5))
-        assert isinstance(result, str)
+        assert isinstance(result, TranscribeResult)
 
 
 # ---------------------------------------------------------------------------
@@ -180,19 +188,28 @@ class TestTranscribeWithModel:
         self.model = load_model()
 
     def test_transcribe_silence_with_model(self):
-        from lazy_claude.stt import transcribe
+        from lazy_claude.stt import transcribe, TranscribeResult
         result = transcribe(_silence(1.0), model=self.model)
-        assert isinstance(result, str)
+        assert isinstance(result, TranscribeResult)
+        assert isinstance(result.text, str)
+        assert isinstance(result.no_speech_prob, float)
 
     def test_transcribe_noise_with_model(self):
-        from lazy_claude.stt import transcribe
+        from lazy_claude.stt import transcribe, TranscribeResult
         result = transcribe(_noise(1.0), model=self.model)
-        assert isinstance(result, str)
+        assert isinstance(result, TranscribeResult)
+        assert isinstance(result.text, str)
 
     def test_transcribe_empty_with_model(self):
         from lazy_claude.stt import transcribe
         result = transcribe(np.array([], dtype=np.float32), model=self.model)
-        assert result == ""
+        assert result.text == ""
+        assert result.no_speech_prob == 1.0
+
+    def test_transcribe_no_speech_prob_in_range(self):
+        from lazy_claude.stt import transcribe
+        result = transcribe(_silence(1.0), model=self.model)
+        assert 0.0 <= result.no_speech_prob <= 1.0
 
     def test_transcribe_does_not_write_to_stdout(self):
         """transcribe() must not emit anything on stdout."""

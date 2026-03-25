@@ -38,9 +38,17 @@ def _make_mock_tts():
     return mock
 
 
+def _make_transcribe_result(text: str = "hello world", no_speech_prob: float = 0.1):
+    """Return a TranscribeResult for use in mocks."""
+    from lazy_claude.stt import TranscribeResult
+    return TranscribeResult(text=text, no_speech_prob=no_speech_prob)
+
+
 def _make_mock_transcribe(return_value="hello world"):
-    """Return a mock transcribe function."""
-    return MagicMock(return_value=return_value)
+    """Return a mock transcribe function returning a TranscribeResult."""
+    from lazy_claude.stt import TranscribeResult
+    result = TranscribeResult(text=return_value, no_speech_prob=0.1)
+    return MagicMock(return_value=result)
 
 
 def _make_mock_listener(next_speech=None):
@@ -233,7 +241,8 @@ class TestAskUserVoiceSuccess:
     def test_returns_formatted_qa_string(self):
         audio = self._dummy_audio()
         server, mock_tts, mock_listener = _make_server(next_speech=audio)
-        with patch('lazy_claude.server.transcribe', return_value="I am fine"):
+        with patch('lazy_claude.server.transcribe',
+                   return_value=_make_transcribe_result("I am fine")):
             result = server.ask_user_voice_impl(questions=["How are you?"])
         assert "Q: How are you?" in result
         assert "A: I am fine" in result
@@ -245,9 +254,10 @@ class TestAskUserVoiceSuccess:
         call_count = [0]
 
         def mock_transcribe(a, model=None):
+            from lazy_claude.stt import TranscribeResult
             idx = call_count[0]
             call_count[0] += 1
-            return answers[idx]
+            return TranscribeResult(text=answers[idx], no_speech_prob=0.1)
 
         with patch('lazy_claude.server.transcribe', side_effect=mock_transcribe):
             result = server.ask_user_voice_impl(
@@ -262,7 +272,8 @@ class TestAskUserVoiceSuccess:
         """Empty transcription should still be returned, not dropped."""
         audio = self._dummy_audio()
         server, mock_tts, mock_listener = _make_server(next_speech=audio)
-        with patch('lazy_claude.server.transcribe', return_value=""):
+        with patch('lazy_claude.server.transcribe',
+                   return_value=_make_transcribe_result("")):
             result = server.ask_user_voice_impl(questions=["Say something?"])
         assert "Q: Say something?" in result
         assert "A:" in result
@@ -270,7 +281,8 @@ class TestAskUserVoiceSuccess:
     def test_tts_speak_called_for_each_question(self):
         audio = self._dummy_audio()
         server, mock_tts, mock_listener = _make_server(next_speech=audio)
-        with patch('lazy_claude.server.transcribe', return_value="yes"):
+        with patch('lazy_claude.server.transcribe',
+                   return_value=_make_transcribe_result("yes")):
             server.ask_user_voice_impl(questions=["Q1?", "Q2?", "Q3?"])
         assert mock_tts.speak.call_count == 3
 
@@ -312,7 +324,8 @@ class TestConcurrentCallProtection:
     def test_busy_flag_cleared_after_call(self):
         audio = np.zeros(16_000, dtype=np.float32)
         server, mock_tts, mock_listener = _make_server(next_speech=audio)
-        with patch('lazy_claude.server.transcribe', return_value="ok"):
+        with patch('lazy_claude.server.transcribe',
+                   return_value=_make_transcribe_result("ok")):
             server.ask_user_voice_impl(questions=["Test?"])
         assert server.busy is False
 

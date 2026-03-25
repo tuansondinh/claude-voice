@@ -9,9 +9,14 @@ load_model(model_name: str = "base.en") -> Model
     Download (first run) and load a whisper.cpp model.  Returns a
     pywhispercpp.model.Model instance.
 
-transcribe(audio: np.ndarray, model: Model | None = None) -> str
-    Transcribe a 16 kHz mono float32 numpy array.  Returns the recognised
-    text with artifacts stripped, or an empty string for silent/empty input.
+transcribe(audio: np.ndarray, model: Model | None = None) -> TranscribeResult
+    Transcribe a 16 kHz mono float32 numpy array.  Returns a TranscribeResult
+    with the recognised text (stripped of artefacts) and the no_speech_prob
+    averaged across segments.  For empty/silent input, text is "" and
+    no_speech_prob is 1.0.
+
+TranscribeResult
+    Dataclass: text (str) + no_speech_prob (float).
 
 _strip_artifacts(text: str) -> str
     Remove common whisper hallucination tokens and extraneous whitespace.
@@ -22,6 +27,7 @@ from __future__ import annotations
 
 import re
 import sys
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -34,6 +40,32 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 _DEFAULT_MODEL = "base.en"
+
+
+# ---------------------------------------------------------------------------
+# TranscribeResult — structured return type for transcribe()
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TranscribeResult:
+    """Result returned by :func:`transcribe`.
+
+    Attributes
+    ----------
+    text:
+        Recognised text, stripped of artefacts.  Empty string for silent or
+        empty input.
+    no_speech_prob:
+        Whisper's no-speech probability averaged across all segments.
+        Ranges from 0.0 (definitely speech) to 1.0 (definitely silence/noise).
+        For early-exit cases (empty audio, too short) this is set to 1.0.
+        Phase 2 uses this to discard frames that Whisper itself classifies as
+        non-speech, complementing VAD pre-filtering.
+    """
+
+    text: str
+    no_speech_prob: float
 
 # Minimum number of samples required to attempt transcription.
 # Whisper needs at least ~0.1 s of audio to be meaningful.
@@ -159,7 +191,7 @@ def transcribe(
     *,
     model: "Model | None" = None,
     model_name: str = _DEFAULT_MODEL,
-) -> str:
+) -> TranscribeResult:
     """Transcribe a 16 kHz mono float32 audio array.
 
     Parameters
@@ -174,19 +206,21 @@ def transcribe(
 
     Returns
     -------
-    str
-        Recognised text, stripped of artefacts.  Returns ``""`` for
-        empty or effectively silent input.
+    TranscribeResult
+        ``.text`` is the recognised text, stripped of artefacts.  Empty
+        string for empty or effectively silent input.
+        ``.no_speech_prob`` is the average no-speech probability across all
+        segments (1.0 for early-exit / empty cases).
     """
     # Guard: nothing to transcribe
     if audio is None or len(audio) == 0:
-        return ""
+        return TranscribeResult(text="", no_speech_prob=1.0)
 
     audio = np.asarray(audio, dtype=np.float32)
 
     if len(audio) < _MIN_SAMPLES:
         _log(f"Audio too short ({len(audio)} samples < {_MIN_SAMPLES}), returning empty.")
-        return ""
+        return TranscribeResult(text="", no_speech_prob=1.0)
 
     if model is None:
         model = load_model(model_name)
@@ -203,11 +237,23 @@ def transcribe(
         )
     except Exception as exc:  # noqa: BLE001
         _log(f"ERROR during transcription: {exc}")
-        return ""
+        return TranscribeResult(text="", no_speech_prob=1.0)
 
-    # Join all segment texts
-    raw = " ".join(seg.text for seg in segments if seg.text)
+    # Join all segment texts and compute average no_speech_prob
+    texts: list[str] = []
+    no_speech_probs: list[float] = []
+    for seg in segments:
+        if seg.text:
+            texts.append(seg.text)
+        # pywhispercpp segments expose no_speech_prob; fall back to 0.0 if absent.
+        nsp = getattr(seg, "no_speech_prob", 0.0)
+        no_speech_probs.append(float(nsp))
 
-    result = _strip_artifacts(raw)
-    _log(f"Transcription: {result!r}")
-    return result
+    raw = " ".join(texts)
+    avg_no_speech_prob = (
+        sum(no_speech_probs) / len(no_speech_probs) if no_speech_probs else 0.0
+    )
+
+    text = _strip_artifacts(raw)
+    _log(f"Transcription: {text!r} (no_speech_prob={avg_no_speech_prob:.3f})")
+    return TranscribeResult(text=text, no_speech_prob=avg_no_speech_prob)

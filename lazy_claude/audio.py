@@ -459,8 +459,13 @@ class ContinuousListener:
 
     # Fallback gate: if AEC residual RMS power exceeds this during TTS → suppress chunk.
     # Acts as a safety net when the adaptive filter has not yet converged.
-    # Power is mean of squared samples. 0.01 ≈ -40 dBFS (RMS ~0.1).
-    AEC_RESIDUAL_GATE_THRESHOLD: float = 0.01
+    # Power is mean of squared samples. 0.001 ≈ -60 dBFS (RMS ~0.03).
+    # Low threshold because even quiet echo is intelligible to Whisper.
+    AEC_RESIDUAL_GATE_THRESHOLD: float = 0.001
+
+    # Post-TTS echo tail: keep the fallback gate active for this long after TTS stops.
+    # Catches echo from the last TTS chunks still propagating through air/buffers.
+    POST_TTS_ECHO_TAIL: float = 0.8  # seconds
 
     def __init__(
         self,
@@ -489,6 +494,8 @@ class ContinuousListener:
         self._stop_event = threading.Event()
         # Lightweight flag: True while TTS is playing (used for fallback gate only)
         self._tts_active: bool = False
+        # Timestamp when TTS stopped — used for post-TTS echo tail
+        self._tts_stopped_at: float = 0.0
         # threading.Event: set = voice mode active (mic collects speech)
         self._active = threading.Event()
 
@@ -517,6 +524,43 @@ class ContinuousListener:
     # Public API (thread-safe)
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Utterance state reset (Phase 2 contract)
+    # ------------------------------------------------------------------
+
+    def _reset_utterance_state(self) -> None:
+        """Reset ALL mid-utterance fields to their initial values.
+
+        This method is the canonical way to clear per-utterance state.
+        Phase 2 calls it on mode switches and set_active(False) so that no
+        partial utterance audio leaks across context boundaries.
+
+        Fields reset:
+        - ``_recording``             → False
+        - ``_accumulated_speech``    → 0.0
+        - ``_silence_started``       → None
+        - VAD state (SileroVAD GRU)  → reset via ``_vad.reset()``
+
+        Note on ``_utterance_chunks``: the list is replaced with a new empty
+        list (not cleared in-place) so that any concurrent reader of a prior
+        reference is unaffected.
+
+        Thread safety: set_active() runs on any thread; ``_make_callback``'s
+        closure runs on the sounddevice callback thread.  The plain bool and
+        list assignment are atomic in CPython, making this safe for Phase 1.
+        Phase 2 may add a lock if needed.
+        """
+        self._recording = False
+        self._utterance_chunks = []
+        self._accumulated_speech = 0.0
+        self._silence_started = None
+        # Reset VAD GRU state so previous utterance's hidden state doesn't
+        # contaminate the next utterance after a mode switch.
+        try:
+            self._vad.reset()
+        except Exception:
+            pass
+
     def set_active(self, active: bool) -> None:
         """Enable or disable speech collection (voice mode toggle).
 
@@ -530,6 +574,7 @@ class ContinuousListener:
             _log("ContinuousListener: voice mode ON.")
         else:
             self._active.clear()
+            self._reset_utterance_state()
             self.drain_queue()
             _log("ContinuousListener: voice mode OFF.")
 
@@ -543,6 +588,8 @@ class ContinuousListener:
         This is a thin flag only — AEC handles the main echo suppression.
         """
         self._tts_active = playing
+        if not playing:
+            self._tts_stopped_at = time.monotonic()
 
     def clear_barge_in(self) -> None:
         """Reset the barge-in flag before a new TTS turn."""
@@ -638,10 +685,18 @@ class ContinuousListener:
                 processed = chunk_16k
 
             tts_active = self._tts_active
+            now = time.monotonic()
 
-            # ── Fallback gate: suppress if AEC residual energy is too high during TTS ──
-            # This catches cases where the adaptive filter has not yet converged.
-            if tts_active:
+            # Check if we're in the post-TTS echo tail window
+            in_echo_tail = (
+                not tts_active
+                and self._tts_stopped_at > 0
+                and (now - self._tts_stopped_at) < self.POST_TTS_ECHO_TAIL
+            )
+
+            # ── Fallback gate: suppress if AEC residual energy is too high ──
+            # Active during TTS and for POST_TTS_ECHO_TAIL seconds after.
+            if tts_active or in_echo_tail:
                 residual_power = float(np.mean(processed.astype(np.float64) ** 2))
                 if residual_power > self.AEC_RESIDUAL_GATE_THRESHOLD:
                     # Echo leaked through — discard chunk; decay barge-in counter
@@ -649,7 +704,6 @@ class ContinuousListener:
                     return
 
             prob = self._vad(processed)
-            now = time.monotonic()
 
             if tts_active:
                 # ── TTS playing: barge-in detection on cleaned signal ──

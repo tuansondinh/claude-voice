@@ -32,6 +32,24 @@ from typing import Any
 # preserved before anything else writes to it.
 from lazy_claude.stdout_guard import get_mcp_stdout  # noqa: E402 (intentional early import)
 
+# ---------------------------------------------------------------------------
+# Canonical environment variable names
+# ---------------------------------------------------------------------------
+# These are the ONLY env var names used by lazy-claude.  Do not introduce
+# alternative spellings; Phase 3 (Porcupine wake word) reads these directly.
+
+# Picovoice access key for Porcupine wake-word engine.
+ENV_PORCUPINE_ACCESS_KEY = "PORCUPINE_ACCESS_KEY"
+
+# Path to a custom Porcupine .ppn model file (optional — uses built-in
+# "hey claude" keyword when not set).
+ENV_PORCUPINE_MODEL_PATH = "PORCUPINE_MODEL_PATH"
+
+# Set to "1" to keep the mic always-on even when Porcupine is configured.
+# Default (unset or "0"): wake-word-only mode when Porcupine is available.
+ENV_LAZY_CLAUDE_ALWAYS_ON = "LAZY_CLAUDE_ALWAYS_ON"
+
+
 # All logging goes to stderr.
 def _log(msg: str) -> None:
     print(f"[lazy-claude server] {msg}", file=sys.stderr, flush=True)
@@ -315,8 +333,9 @@ class VoiceServer:
             return f"Q: {question}\nA: (no response — timed out)"
 
         _log("Transcribing…")
-        answer = transcribe(audio, model=self._whisper_model)
-        return f"Q: {question}\nA: {answer}"
+        result = transcribe(audio, model=self._whisper_model)
+        _log(f"no_speech_prob={result.no_speech_prob:.3f}")
+        return f"Q: {question}\nA: {result.text}"
 
     def _speak_safe(self, text: str) -> None:
         """Run TTS, catching all exceptions so the thread never crashes."""
@@ -324,6 +343,42 @@ class VoiceServer:
             self.tts.speak(text)
         except Exception as exc:
             _log(f"WARNING: TTS error: {exc}")
+
+    # ------------------------------------------------------------------
+    # set_listening_mode — Phase 3 API contract (spec only)
+    # ------------------------------------------------------------------
+
+    def set_listening_mode_impl(self, *, mode: str) -> dict:
+        """Switch between 'wake_word' and 'always_on' listening modes.
+
+        Phase 3 implements this for real (Porcupine integration).  The spec
+        is defined here so Phase 2 can rely on the interface.
+
+        Parameters
+        ----------
+        mode:
+            Requested mode: ``"wake_word"`` or ``"always_on"``.
+
+        Returns
+        -------
+        dict
+            ``{"mode": effective_mode, "porcupine_available": bool}``
+
+            * ``effective_mode`` — the mode actually entered, which MAY differ
+              from ``mode`` when the requested mode is unavailable.  For
+              example, requesting ``"wake_word"`` when Porcupine is not
+              installed yields ``effective_mode="always_on"``.
+            * ``porcupine_available`` — True when the Porcupine engine is
+              loaded and the wake-word model is ready.
+
+        Notes
+        -----
+        On mode switch the listener's utterance state is reset via
+        ``_reset_utterance_state()`` so no mid-utterance audio leaks across
+        mode boundaries.
+        """
+        # Stub — full implementation in Phase 3.
+        raise NotImplementedError("set_listening_mode is implemented in Phase 3")
 
     def shutdown(self) -> None:
         """Release resources on server stop."""

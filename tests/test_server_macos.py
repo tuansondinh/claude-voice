@@ -37,6 +37,12 @@ for _mod in ('sounddevice', 'kokoro', 'onnxruntime', 'AVFoundation', 'Foundation
         _stub(_mod)
 
 
+def _tr(text: str = "hello", no_speech_prob: float = 0.1):
+    """Return a TranscribeResult for use in transcribe() mocks."""
+    from lazy_claude.stt import TranscribeResult
+    return TranscribeResult(text=text, no_speech_prob=no_speech_prob)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -209,7 +215,7 @@ class TestAskSingleMacOSPath:
             sleep_calls.append(t)
 
         with patch('lazy_claude.server.time') as mock_time, \
-             patch('lazy_claude.server.transcribe', return_value="hello"):
+             patch('lazy_claude.server.transcribe', return_value=_tr("hello")):
             mock_time.sleep = MagicMock(side_effect=_track_sleep)
             mock_time.monotonic = time.monotonic
 
@@ -227,7 +233,7 @@ class TestAskSingleMacOSPath:
         )
 
         with patch('lazy_claude.server.time') as mock_time, \
-             patch('lazy_claude.server.transcribe', return_value="hello"):
+             patch('lazy_claude.server.transcribe', return_value=_tr("hello")):
             mock_time.sleep = MagicMock()
             mock_time.monotonic = time.monotonic
 
@@ -244,7 +250,7 @@ class TestAskSingleMacOSPath:
         )
 
         with patch('lazy_claude.server.time') as mock_time, \
-             patch('lazy_claude.server.transcribe', return_value="answer"):
+             patch('lazy_claude.server.transcribe', return_value=_tr("answer")):
             mock_time.sleep = MagicMock()
             mock_time.monotonic = time.monotonic
             s._ask_single("Hello?")
@@ -259,7 +265,8 @@ class TestAskSingleMacOSPath:
         )
 
         with patch('lazy_claude.server.time') as mock_time, \
-             patch('lazy_claude.server.transcribe', return_value="test answer") as mock_transcribe:
+             patch('lazy_claude.server.transcribe',
+                   return_value=_tr("test answer")) as mock_transcribe:
             mock_time.sleep = MagicMock()
             mock_time.monotonic = time.monotonic
             result = s._ask_single("Question?")
@@ -275,7 +282,7 @@ class TestAskSingleMacOSPath:
         )
 
         with patch('lazy_claude.server.time') as mock_time, \
-             patch('lazy_claude.server.transcribe', return_value="yes"):
+             patch('lazy_claude.server.transcribe', return_value=_tr("yes")):
             mock_time.sleep = MagicMock()
             mock_time.monotonic = time.monotonic
             result = s._ask_single("Are you there?")
@@ -304,7 +311,7 @@ class TestAskSingleFallbackPath:
             sleep_calls.append(t)
 
         with patch('lazy_claude.server.time') as mock_time, \
-             patch('lazy_claude.server.transcribe', return_value="hello"):
+             patch('lazy_claude.server.transcribe', return_value=_tr("hello")):
             mock_time.sleep = MagicMock(side_effect=_track_sleep)
             mock_time.monotonic = time.monotonic
 
@@ -322,7 +329,7 @@ class TestAskSingleFallbackPath:
         )
 
         with patch('lazy_claude.server.time') as mock_time, \
-             patch('lazy_claude.server.transcribe', return_value="hello"):
+             patch('lazy_claude.server.transcribe', return_value=_tr("hello")):
             mock_time.sleep = MagicMock()
             mock_time.monotonic = time.monotonic
 
@@ -339,7 +346,7 @@ class TestAskSingleFallbackPath:
         )
 
         with patch('lazy_claude.server.time') as mock_time, \
-             patch('lazy_claude.server.transcribe', return_value="ok"):
+             patch('lazy_claude.server.transcribe', return_value=_tr("ok")):
             mock_time.sleep = MagicMock()
             mock_time.monotonic = time.monotonic
             s._ask_single("Hello?")

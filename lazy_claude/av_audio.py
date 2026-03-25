@@ -232,9 +232,18 @@ class AVAudioBackend:
         self._player = AVFoundation.AVAudioPlayerNode.alloc().init()
         self._engine.attachNode_(self._player)
 
-        # Connect player → mainMixerNode using the mixer's input format
-        mixer_format = self._mixer_node.outputFormatForBus_(0)
-        self._engine.connect_to_format_(self._player, self._mixer_node, mixer_format)
+        # Connect player → mainMixerNode using an explicit mono format at the
+        # hardware output rate.  The mixer output format may be stereo/multi-channel,
+        # but play_audio() schedules mono buffers — they must match or CoreAudio
+        # raises "channelCount mismatch".
+        output_rate = float(self._mixer_node.outputFormatForBus_(0).sampleRate())
+        player_format = AVFoundation.AVAudioFormat.alloc().initWithCommonFormat_sampleRate_channels_interleaved_(
+            AVFoundation.AVAudioPCMFormatFloat32,
+            output_rate,
+            1,
+            True,
+        )
+        self._engine.connect_to_format_(self._player, self._mixer_node, player_format)
 
         # 4. Enable voice processing (system-level AEC + NS) on inputNode
         error_ptr = None
@@ -289,19 +298,68 @@ class AVAudioBackend:
             _log(f"WARNING: could not register config change notification: {exc}")
 
     def _restart_engine(self) -> None:
-        """Handle AVAudioEngine configuration change (device change)."""
+        """Handle AVAudioEngine configuration change (device change).
+
+        AVAudioEngine tears down the audio graph on device change, so we must:
+        1. Stop consumer thread and flag tap as gone (engine already removed it).
+        2. Stop the engine.
+        3. Reconnect player with a fresh mono format at the new hardware rate.
+        4. Restart the engine.
+        5. Re-install the mic tap if one was active.
+        """
         _log("AVAudioBackend: configuration change — restarting engine.")
         try:
-            self._engine.stop()
+            AVFoundation = self._AVFoundation
+
+            # 1. Explicitly remove the tap before stopping — engine.stop() alone
+            #    does NOT clear CoreAudio's internal tap slot, causing "nullptr == Tap()"
+            #    when we try to re-install after restart.
+            had_tap = self._tap_installed
+            saved_callback = self._tap_callback
+            if had_tap:
+                try:
+                    self._input_node.removeTapOnBus_(0)
+                except Exception:
+                    pass
+                self._consumer_stop.set()
+                if self._consumer_thread is not None:
+                    self._consumer_thread.join(timeout=1.0)
+                self._tap_installed = False
+                self._consumer_stop.clear()
+
+            # 2. Stop engine.
             self._running = False
+            self._engine.stop()
             time.sleep(0.1)
+
+            # 3. Reconnect player with a fresh mono format at the new output rate.
+            #    The hardware output rate may have changed after device switch.
+            try:
+                output_rate = float(self._mixer_node.outputFormatForBus_(0).sampleRate())
+                player_format = AVFoundation.AVAudioFormat.alloc().initWithCommonFormat_sampleRate_channels_interleaved_(
+                    AVFoundation.AVAudioPCMFormatFloat32,
+                    output_rate,
+                    1,
+                    True,
+                )
+                self._engine.connect_to_format_(self._player, self._mixer_node, player_format)
+            except Exception as exc:
+                _log(f"WARNING: AVAudioBackend: could not reconnect player after device change: {exc}")
+
+            # 4. Restart.
             started = self._engine.startAndReturnError_(None)
-            if started:
-                self._running = True
-                self._player.play()
-                _log("AVAudioBackend: engine restarted after config change.")
-            else:
+            if not started:
                 _log("ERROR: AVAudioBackend: engine failed to restart after config change.")
+                return
+
+            self._running = True
+            self._player.play()
+            _log("AVAudioBackend: engine restarted after config change.")
+
+            # 5. Re-install mic tap if one was active.
+            if had_tap and saved_callback is not None:
+                self.install_mic_tap(saved_callback)
+
         except Exception as exc:
             _log(f"ERROR: AVAudioBackend config change handler: {exc}")
 
@@ -453,6 +511,11 @@ class AVAudioBackend:
             _log(f"WARNING: could not write to AVAudioPCMBuffer: {exc}")
             return
 
+        # Ensure the player node is in play() state — it may have been stopped
+        # by a previous barge-in or been idle since engine startup.
+        if not self._player.isPlaying():
+            self._player.play()
+
         self._player.scheduleBuffer_completionHandler_(buf, completion_handler)
 
     def stop_playback(self) -> None:
@@ -531,6 +594,34 @@ class MacOSContinuousListener:
     # Public API (thread-safe)
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Utterance state reset (Phase 2 contract)
+    # ------------------------------------------------------------------
+
+    def _reset_utterance_state(self) -> None:
+        """Reset ALL mid-utterance fields to their initial values.
+
+        This method is the canonical way to clear per-utterance state.
+        Phase 2 calls it on mode switches and set_active(False) so that no
+        partial utterance audio leaks across context boundaries.
+
+        Fields reset:
+        - ``_utterance_chunks``     → empty list
+        - ``_silence_started``      → None
+        - ``_barge_in_frame_count`` → 0
+        - ``_state``-equivalent     → ``_recording = False``
+
+        Thread safety: called from the public API (set_active) which may run
+        on any thread, but ``_process_chunk`` (the writer) runs on the tap
+        consumer thread.  Because ``_recording`` is a plain bool and list
+        assignment is atomic in CPython, the reset is safe without a lock for
+        the Phase 1 contract.  Phase 2 may add a lock if needed.
+        """
+        self._utterance_chunks = []
+        self._silence_started = None
+        self._barge_in_frame_count = 0
+        self._recording = False
+
     def set_active(self, active: bool) -> None:
         """Enable or disable speech collection (voice mode toggle)."""
         if active:
@@ -539,6 +630,7 @@ class MacOSContinuousListener:
             _log("MacOSContinuousListener: voice mode ON.")
         else:
             self._active.clear()
+            self._reset_utterance_state()
             self.drain_queue()
             _log("MacOSContinuousListener: voice mode OFF.")
 
