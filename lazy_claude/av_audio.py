@@ -20,6 +20,7 @@ AVAudioBackend will raise RuntimeError.
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import queue
@@ -276,23 +277,24 @@ class AVAudioBackend:
             if self._Foundation is None:
                 return
             nc = self._Foundation.NSNotificationCenter.defaultCenter()
+            # ObjC blocks only receive a single notification parameter.
+            # Use a lambda that captures self so _restart_engine() can be called.
             nc.addObserverForName_object_queue_usingBlock_(
                 "AVAudioEngineConfigurationChangeNotification",
                 self._engine,
                 None,
-                self._on_config_change,
+                lambda notification: self._restart_engine(),
             )
         except Exception as exc:
             _log(f"WARNING: could not register config change notification: {exc}")
 
-    def _on_config_change(self, notification: Any) -> None:
+    def _restart_engine(self) -> None:
         """Handle AVAudioEngine configuration change (device change)."""
         _log("AVAudioBackend: configuration change — restarting engine.")
         try:
             self._engine.stop()
             self._running = False
-            import time as _time
-            _time.sleep(0.1)
+            time.sleep(0.1)
             started = self._engine.startAndReturnError_(None)
             if started:
                 self._running = True
@@ -342,7 +344,6 @@ class AVAudioBackend:
                 if channel_data is None or frame_count == 0:
                     return
                 # channel_data[0] is a ctypes float pointer
-                import ctypes
                 ptr = channel_data[0]
                 arr = np.ctypeslib.as_array(
                     (ctypes.c_float * frame_count).from_address(ctypes.addressof(ptr.contents))
@@ -399,7 +400,11 @@ class AVAudioBackend:
     # Playback
     # ------------------------------------------------------------------
 
-    def play_audio(self, chunk_24k: np.ndarray) -> None:
+    def play_audio(
+        self,
+        chunk_24k: np.ndarray,
+        completion_handler: Optional[Callable[[], None]] = None,
+    ) -> None:
         """Resample a 24kHz chunk to 44.1kHz and schedule on the player node.
 
         Non-blocking — returns immediately after scheduling.
@@ -408,6 +413,10 @@ class AVAudioBackend:
         ----------
         chunk_24k:
             1-D float32 audio at 24kHz (Kokoro output rate).
+        completion_handler:
+            Optional callable invoked by AVAudioPlayerNode when this buffer
+            finishes playing.  Used by MacOSTTSEngine to detect when the
+            last buffer has been rendered.
         """
         if not self._running:
             return
@@ -429,7 +438,6 @@ class AVAudioBackend:
 
         # Write samples into the buffer's float channel data
         try:
-            import ctypes
             channel_data = buf.floatChannelData()
             ptr = channel_data[0]
             dest = np.ctypeslib.as_array(
@@ -440,7 +448,7 @@ class AVAudioBackend:
             _log(f"WARNING: could not write to AVAudioPCMBuffer: {exc}")
             return
 
-        self._player.scheduleBuffer_completionHandler_(buf, None)
+        self._player.scheduleBuffer_completionHandler_(buf, completion_handler)
 
     def stop_playback(self) -> None:
         """Interrupt active playback; re-prime the player for the next utterance."""
@@ -493,13 +501,12 @@ class MacOSContinuousListener:
     SILENCE_DURATION: float = 1.5
     MIN_SPEECH_DURATION: float = 0.5
 
-    def __init__(self, vad_model: Any) -> None:
+    def __init__(self, vad_model: Any, backend: "AVAudioBackend") -> None:
         self._vad = vad_model
         self._speech_queue: queue.Queue[np.ndarray] = queue.Queue()
         self._barge_in_event = threading.Event()
         self._stop_event = threading.Event()
         self._tts_active: bool = False
-        self._tts_stopped_at: float = 0.0
         self._active = threading.Event()
 
         # Per-utterance state (written only by _process_chunk, single consumer thread)
@@ -509,8 +516,8 @@ class MacOSContinuousListener:
         self._silence_started: Optional[float] = None
         self._barge_in_frame_count: int = 0
 
-        # Build backend and install tap
-        self._backend = AVAudioBackend()
+        # Use the shared backend and install tap
+        self._backend = backend
         self._backend.install_mic_tap(self._process_chunk)
 
         _log("MacOSContinuousListener started.")
@@ -537,8 +544,6 @@ class MacOSContinuousListener:
     def set_tts_playing(self, playing: bool) -> None:
         """Set the TTS-active flag for barge-in detection."""
         self._tts_active = playing
-        if not playing:
-            self._tts_stopped_at = time.monotonic()
 
     def clear_barge_in(self) -> None:
         """Reset the barge-in flag before a new TTS turn."""
@@ -671,14 +676,14 @@ class MacOSTTSEngine:
     _VOICE = 'af_heart'
     _REPO_ID = 'hexgrad/Kokoro-82M'
 
-    def __init__(self) -> None:
+    def __init__(self, backend: "AVAudioBackend") -> None:
         if KPipeline is None:  # pragma: no cover
             raise ImportError(
                 "kokoro is required for MacOSTTSEngine. "
                 "Install it with: pip install kokoro"
             )
         self._pipeline = KPipeline(lang_code='a', repo_id=self._REPO_ID)
-        self._backend = AVAudioBackend()
+        self._backend = backend
         self._speaking = False
         self._stop_event = threading.Event()
 
@@ -723,8 +728,17 @@ class MacOSTTSEngine:
     # ------------------------------------------------------------------
 
     def _stream_speak(self, text: str) -> None:
-        """Run the Kokoro generator and feed each chunk to the backend."""
+        """Run the Kokoro generator and feed each chunk to the backend.
+
+        Blocks until all scheduled audio has finished playing through the
+        speakers.  Uses a threading.Event signalled by the AVAudioPlayerNode
+        completion handler on the last buffer so that speak() only returns
+        after the audio is audibly done.
+        """
         generator = self._pipeline(text, voice=self._VOICE)
+
+        # Collect all valid chunks first so we know which one is last.
+        chunks: list[np.ndarray] = []
         for result in generator:
             if self._stop_event.is_set():
                 break
@@ -742,7 +756,25 @@ class MacOSTTSEngine:
             if chunk.size == 0:
                 continue
 
-            if self._stop_event.is_set():
-                break
+            chunks.append(chunk)
 
+        if not chunks or self._stop_event.is_set():
+            return
+
+        # Schedule all but the last chunk without a completion handler.
+        for chunk in chunks[:-1]:
+            if self._stop_event.is_set():
+                return
             self._backend.play_audio(chunk)
+
+        # Schedule the last chunk with a completion handler so we know when
+        # playback has truly finished.
+        done_event = threading.Event()
+
+        def _on_complete() -> None:
+            done_event.set()
+
+        self._backend.play_audio(chunks[-1], completion_handler=_on_complete)
+
+        # Wait for the last buffer to finish playing (up to 30 s safety timeout).
+        done_event.wait(timeout=30.0)

@@ -119,16 +119,17 @@ class VoiceServer:
             return False
 
         try:
-            # Create a shared backend instance for the listener
-            backend = AVAudioBackend()
+            # Create ONE shared AVAudioBackend so mic capture and TTS playback
+            # run through the same AVAudioEngine instance — required for system AEC.
+            shared_backend = AVAudioBackend()
 
             # Whisper model (needed for STT regardless of audio backend)
             self._whisper_model = load_model()
             self._vad_model = load_vad_model()
 
-            # Instantiate macOS-native listener and TTS
-            self._listener = MacOSContinuousListener(self._vad_model)
-            self.tts = MacOSTTSEngine()
+            # Instantiate macOS-native listener and TTS, both sharing the same backend.
+            self._listener = MacOSContinuousListener(self._vad_model, backend=shared_backend)
+            self.tts = MacOSTTSEngine(backend=shared_backend)
 
             _log("Using macOS AVAudioEngine backend with system AEC.")
             return True

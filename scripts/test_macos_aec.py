@@ -57,12 +57,13 @@ def main() -> None:
     from lazy_claude.audio import load_vad_model
     vad_model = load_vad_model()
 
-    # Step 4: Create TTS engine and listener
+    # Step 4: Create TTS engine and listener — both share the SAME backend so
+    # that system AEC can suppress the TTS output from the mic.
     print("[test_macos_aec] Creating TTS engine…", flush=True)
-    tts = MacOSTTSEngine()
+    tts = MacOSTTSEngine(backend=backend)
 
     print("[test_macos_aec] Creating listener…", flush=True)
-    listener = MacOSContinuousListener(vad_model)
+    listener = MacOSContinuousListener(vad_model, backend=backend)
     listener.set_active(True)
 
     # Step 5: Speak a test phrase

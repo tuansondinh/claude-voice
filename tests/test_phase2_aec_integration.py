@@ -14,11 +14,21 @@ Tests cover:
 
 from __future__ import annotations
 
+import sys
 import time
 import threading
 from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
+
+# ---------------------------------------------------------------------------
+# Stub missing optional dependencies so module-level imports succeed
+# in environments where sounddevice / kokoro / mcp are not installed.
+# ---------------------------------------------------------------------------
+for _missing in ('sounddevice', 'kokoro', 'mcp', 'mcp.server',
+                 'mcp.server.fastmcp', 'mcp.server.stdio', 'anyio'):
+    if _missing not in sys.modules:
+        sys.modules[_missing] = MagicMock()
 
 SAMPLE_RATE = 16_000
 CHUNK = 512
@@ -76,6 +86,7 @@ class TestTTSEngineReferenceBuffer:
 
     def test_tts_engine_accepts_ref_buf_constructor(self):
         """TTSEngine __init__ should accept a ref_buf keyword argument."""
+        import lazy_claude.tts  # ensure module is imported before patch resolves targets
         from lazy_claude.aec import ReferenceBuffer
         buf = ReferenceBuffer()
         with patch('lazy_claude.tts.KPipeline'), \
@@ -86,6 +97,7 @@ class TestTTSEngineReferenceBuffer:
 
     def test_tts_engine_without_ref_buf_still_works(self):
         """TTSEngine with no ref_buf should behave exactly as before."""
+        import lazy_claude.tts  # ensure module is imported before patch resolves targets
         with patch('lazy_claude.tts.KPipeline'), \
              patch('lazy_claude.tts.sd'):
             from lazy_claude.tts import TTSEngine
@@ -94,6 +106,7 @@ class TestTTSEngineReferenceBuffer:
 
     def test_tts_engine_pushes_chunks_to_ref_buf(self):
         """Each audio chunk written to speaker should also be written to ref_buf."""
+        import lazy_claude.tts  # ensure module is imported before patch resolves targets
         from lazy_claude.aec import ReferenceBuffer
 
         buf = MagicMock(spec=ReferenceBuffer)
@@ -123,6 +136,7 @@ class TestTTSEngineReferenceBuffer:
 
     def test_tts_engine_ref_buf_receives_float32_array(self):
         """Chunks pushed to ref_buf must be float32 numpy arrays."""
+        import lazy_claude.tts  # ensure module is imported before patch resolves targets
         written_chunks = []
 
         class CapturingBuffer:
@@ -425,8 +439,10 @@ class TestSpeakMessageNoSetTTSPlaying:
     """speak_message_impl should NOT call listener.set_tts_playing() anymore."""
 
     def _make_server(self):
+        import lazy_claude.server  # ensure module is imported before patch resolves targets
         mock_tts = _make_mock_tts()
-        with patch('lazy_claude.server.TTSEngine', return_value=mock_tts), \
+        with patch('sys.platform', 'linux'), \
+             patch('lazy_claude.server.TTSEngine', return_value=mock_tts), \
              patch('lazy_claude.server.load_model', return_value=MagicMock()), \
              patch('lazy_claude.server.load_vad_model', return_value=MagicMock()), \
              patch('lazy_claude.server.ReferenceBuffer'), \
@@ -460,8 +476,10 @@ class TestAskSingleEchoTailDrain:
     """_ask_single should sleep for echo tail and drain queue after TTS."""
 
     def _make_server(self):
+        import lazy_claude.server  # ensure module is imported before patch resolves targets
         mock_tts = _make_mock_tts()
-        with patch('lazy_claude.server.TTSEngine', return_value=mock_tts), \
+        with patch('sys.platform', 'linux'), \
+             patch('lazy_claude.server.TTSEngine', return_value=mock_tts), \
              patch('lazy_claude.server.load_model', return_value=MagicMock()), \
              patch('lazy_claude.server.load_vad_model', return_value=MagicMock()), \
              patch('lazy_claude.server.ReferenceBuffer'), \
@@ -496,13 +514,22 @@ class TestAskSingleEchoTailDrain:
 
 
 class TestVoiceServerAECWiring:
-    """VoiceServer.__init__ should create shared ReferenceBuffer and EchoCanceller."""
+    """VoiceServer.__init__ should create shared ReferenceBuffer and EchoCanceller.
+
+    These tests exercise the sounddevice fallback path (sys.platform patched to
+    'linux') so they work on macOS without needing AVFoundation / mic permissions.
+    """
 
     def _make_server_with_stubs(self):
+        import lazy_claude.server  # ensure module is imported before patch resolves targets
         mock_tts = _make_mock_tts()
-        with patch('lazy_claude.server.TTSEngine', return_value=mock_tts), \
+        # Patch sys.platform to 'linux' so VoiceServer skips the macOS branch
+        # and goes straight to the fallback path that creates _ref_buf / _echo_canceller.
+        with patch('sys.platform', 'linux'), \
+             patch('lazy_claude.server.TTSEngine', return_value=mock_tts), \
              patch('lazy_claude.server.load_model', return_value=MagicMock()), \
-             patch('lazy_claude.server.load_vad_model', return_value=MagicMock()):
+             patch('lazy_claude.server.load_vad_model', return_value=MagicMock()), \
+             patch('lazy_claude.server.ContinuousListener'):
             from lazy_claude.server import VoiceServer
             s = VoiceServer()
         s.tts = mock_tts
