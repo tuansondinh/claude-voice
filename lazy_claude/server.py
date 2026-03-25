@@ -45,7 +45,7 @@ ENV_LAZY_CLAUDE_ALWAYS_ON = "LAZY_CLAUDE_ALWAYS_ON"
 _VOICE_SUBMIT_KEYWORD_RE = re.compile(r"(?i)\bover\b[\s.!?,:;]*$")
 _VOICE_STOP_KEYWORD_RE = re.compile(r"(?i)^\s*stop(?:\s+stop)*[\s.!?,:;]*$")
 _INITIAL_RESPONSE_TIMEOUT = 60.0
-_CONTINUATION_RESPONSE_TIMEOUT = 1.5
+_CONTINUATION_RESPONSE_TIMEOUT = 3.0
 _CONTINUATION_POLL_INTERVAL = 0.05
 _VOICE_DEVICE_LOCK_PATH = (
     Path(os.environ.get("XDG_RUNTIME_DIR") or os.environ.get("TMPDIR") or "/tmp")
