@@ -62,6 +62,44 @@ If you want the same experience, add a section like this to your global `CLAUDE.
 
 This prompt setup is recommended if you want the full voice-mode behavior. MCP installation alone only makes the tools available.
 
+## How To Use
+
+Once the MCP server is installed, there are two common ways to start using it:
+
+### 1. Ask Claude to enable voice mode
+
+If your prompt setup includes voice-mode instructions, tell Claude something like:
+
+```text
+Enable voice mode
+```
+
+or:
+
+```text
+Switch to voice mode
+```
+
+Claude should then start using `ask_user_voice` for spoken interaction instead of asking for typed replies.
+
+### 2. Trigger voice mode with a hook or keybinding
+
+If you have a local hook configured, you can bind a key such as `V` to trigger voice mode.
+
+Typical behavior:
+- press `V`
+- your hook tells Claude to enter voice mode
+- Claude calls `ask_user_voice` with an initial spoken prompt such as: "Now in voice mode. What would you like to do?"
+
+This is optional client-side setup. The MCP server does not create the `V` keybinding by itself; your local Claude workflow or hook needs to do that.
+
+### Leaving voice mode
+
+If your prompt setup mirrors the example in this README, exit by saying something like:
+- `exit voice mode`
+- `stop voice mode`
+- `back to text`
+
 ### Other MCP Clients
 
 Any stdio MCP client can run this server. For local development, the generic command is:
