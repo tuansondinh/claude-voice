@@ -50,9 +50,23 @@ Or add manually to `~/.claude.json` under `mcpServers`:
 
 > On first run the server auto-installs its Python dependencies (~500MB). Subsequent starts are instant.
 
-### 3. Restart Claude Code
+### 3. Install the Claude Code skill (optional)
 
-If Claude Code is already running, restart it so the new MCP server is loaded.
+The skill adds a `/agent-voice` slash command that activates full voice mode in one step:
+
+```bash
+claude plugin install @tuan_son.dinh/agent-voice-mcp
+```
+
+Then use it inside any Claude Code session:
+
+```text
+/agent-voice
+```
+
+### 4. Restart Claude Code
+
+If Claude Code is already running, restart it so the new MCP server and plugin are loaded.
 
 That is enough for installation. No `CLAUDE.md` changes are required just to make the MCP server available.
 
