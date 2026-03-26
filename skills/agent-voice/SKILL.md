@@ -13,12 +13,17 @@ Call `mcp__agent-voice__ask_user_voice` with: "Now in Agent Voice mode. What wou
 Process the user's spoken request as you normally would.
 
 **Step 3 — Announce before executing**
-Before calling any tool or executing any action, first call `mcp__agent-voice__speak_message` to briefly tell the user what you are about to do. Keep it concise (e.g., "Reading the server file now." or "Running the tests." or "Editing pyproject.toml.").
+Before calling any tool or executing any action, briefly tell the user what you are about to do.
+
+**Choose the right tool — one call only, never two:**
+- **Need user input or a decision?** → call `mcp__agent-voice__ask_user_voice` directly, including any context in the question itself (e.g., "cloudflared isn't installed yet — should I install it with Homebrew and set up the tunnel?"). NEVER precede it with a `speak_message` call.
+- **Pure one-way announcement, no response needed?** → call `mcp__agent-voice__speak_message` (e.g., "Reading the server file now." / "Running the tests.").
 
 **Step 4 — Stay in voice mode**
 For ALL follow-up questions, confirmations, and status updates:
-- Use `mcp__agent-voice__ask_user_voice` when you need a response
-- Use `mcp__agent-voice__speak_message` for short one-way confirmations (no response needed)
+- Use `mcp__agent-voice__ask_user_voice` when you need a response — embed all relevant context in the question
+- Use `mcp__agent-voice__speak_message` for purely informational updates with no follow-up question
+- NEVER chain `speak_message` → `ask_user_voice` for the same topic — that always collapses into a single `ask_user_voice` call
 - NEVER output plain text for interaction — the user may not have a keyboard
 
 **Step 5 — Exit only on explicit command**

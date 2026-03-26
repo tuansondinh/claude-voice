@@ -1,7 +1,7 @@
 {
   "name": "agent-voice",
   "description": "Full voice mode for Claude Code — speak your requests, hear responses via TTS, hands-free coding.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": {
     "name": "tuansondinh"
   },
