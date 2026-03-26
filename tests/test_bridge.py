@@ -37,8 +37,7 @@ class TestBridgeModule:
 
 
 class TestHealthEndpoint:
-    @pytest.mark.asyncio
-    async def test_health_before_models(self):
+    def test_health_before_models(self):
         """Health endpoint should report loading status."""
         from lazy_claude.bridge import app
 
@@ -52,8 +51,7 @@ class TestHealthEndpoint:
 
 
 class TestWebSocketAuth:
-    @pytest.mark.asyncio
-    async def test_invalid_token_rejected(self):
+    def test_invalid_token_rejected(self):
         """WebSocket with invalid token should be closed."""
         from lazy_claude.bridge import app
 
@@ -64,8 +62,7 @@ class TestWebSocketAuth:
             with client.websocket_connect("/ws?token=invalid"):
                 pass
 
-    @pytest.mark.asyncio
-    async def test_missing_token_rejected(self):
+    def test_missing_token_rejected(self):
         """WebSocket without token should be closed."""
         from lazy_claude.bridge import app
 

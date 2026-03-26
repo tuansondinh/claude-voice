@@ -24,7 +24,7 @@ def mock_vad():
             return vad._probs[idx]
         return 0.0  # silence by default
 
-    vad.__call__ = call_fn
+    vad.side_effect = call_fn
     vad.reset = MagicMock()
     return vad
 

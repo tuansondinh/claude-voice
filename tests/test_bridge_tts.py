@@ -20,7 +20,6 @@ class TestBufferedTTSEngine:
         fake_audio.cpu.return_value.numpy.return_value.astype.return_value = (
             np.random.randn(4800).astype(np.float32)  # 200ms at 24kHz
         )
-        fake_audio.cpu.return_value.numpy.return_value.astype.return_value.size = 4800
 
         mock_result = MagicMock()
         mock_result.audio = fake_audio
@@ -57,7 +56,6 @@ class TestBufferedTTSEngine:
         fake_audio.cpu.return_value.numpy.return_value.astype.return_value = (
             np.random.randn(4800).astype(np.float32)
         )
-        fake_audio.cpu.return_value.numpy.return_value.astype.return_value.size = 4800
 
         # Return many results
         mock_result = MagicMock()

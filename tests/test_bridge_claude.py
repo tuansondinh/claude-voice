@@ -91,7 +91,7 @@ class TestExtractText:
 
 class TestSendMessage:
     @patch("lazy_claude.bridge_claude._find_claude_binary", return_value="/usr/bin/claude")
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_send_empty_message(self, mock_find):
         from lazy_claude.bridge_claude import ClaudeSession
 
@@ -102,7 +102,7 @@ class TestSendMessage:
         assert chunks == []
 
     @patch("lazy_claude.bridge_claude._find_claude_binary", return_value="/usr/bin/claude")
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_send_message_streams_text(self, mock_find):
         from lazy_claude.bridge_claude import ClaudeSession
 
@@ -122,7 +122,7 @@ class TestSendMessage:
             for line in lines:
                 yield line
 
-        mock_proc.stdout.__aiter__ = mock_stdout_iter
+        mock_proc.stdout = mock_stdout_iter()
         mock_proc.stderr = AsyncMock()
         mock_proc.stderr.read = AsyncMock(return_value=b"")
         mock_proc.wait = AsyncMock(return_value=0)
